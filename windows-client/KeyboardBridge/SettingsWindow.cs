@@ -52,7 +52,7 @@ sealed class SettingsWindow : Form
     readonly ComboBox updateRate = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 140 };
     Action<double,int>? saveMouseTuning;
     readonly CheckBox launchAtLogin = new() { Text = "Start with Windows", AutoSize = true };
-    readonly CheckBox antiIdle = new() { Text = "Enable anti-idle mouse mover (LOCAL only)", AutoSize = true };
+    readonly CheckBox antiIdle = new() { Text = "Enable remote PC anti-idle (both inputs LOCAL)", AutoSize = true };
     readonly CheckBox adaptive = new() { Text = "Experimental adaptive mouse pacing", AutoSize = true };
     readonly RttGraph rttGraph = new() { Dock = DockStyle.Fill, Height = 110 };
     readonly CheckBox linked = new() { Text = "Switch keyboard + mouse together", AutoSize = true };
@@ -219,7 +219,7 @@ sealed class SettingsWindow : Form
         performance.Controls.Add(saveTuning, 1, 2);
         performance.Controls.Add(adaptive, 1, 3);
         input.Controls.Add(antiIdle, 1, 6);
-        var antiIdleHint = new Label { Text = "After 60 seconds of inactivity, moves the local cursor by 1 pixel after each 60-second idle interval. Stops whenever keyboard or mouse is REMOTE. Default OFF.", AutoSize = true, MaximumSize = new System.Drawing.Size(340, 0) };
+        var antiIdleHint = new Label { Text = "After 60 seconds of local inactivity, moves the REMOTE PC cursor by 1 pixel every 30 seconds. Never moves the local cursor. Stops if keyboard or mouse is REMOTE or the bridge disconnects. Default OFF.", AutoSize = true, MaximumSize = new System.Drawing.Size(340, 0) };
         input.Controls.Add(antiIdleHint, 0, 7);
         input.SetColumnSpan(antiIdleHint, 2);
         input.RowStyles[7].Height = 70;
