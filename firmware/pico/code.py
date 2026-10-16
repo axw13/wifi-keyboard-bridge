@@ -37,7 +37,13 @@ while True:
             if b == 10:
                 try:
                     parts = bytes(line).decode("ascii").strip().split(",")
-                    if len(parts) == 5 and parts[0] == "M":
+                    if len(parts) == 2 and parts[0] == "D":
+                        # Diagnostic request only; reply after UART receipt. This is
+                        # not a timestamp for USB HID delivery or display updates.
+                        probe = int(parts[1])
+                        if 0 <= probe <= 65535:
+                            uart.write(("A,%d\\n" % probe).encode("ascii"))
+                    elif len(parts) == 5 and parts[0] == "M":
                         values = [int(v) for v in parts[1:]]
                         buttons, dx, dy, wheel = values
                         if 0 <= buttons <= 7 and all(-127 <= v <= 127 for v in (dx, dy, wheel)):
