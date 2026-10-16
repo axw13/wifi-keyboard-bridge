@@ -51,6 +51,8 @@ void loop() {
           client.println("ERR");
           client.stop();
         }
+      } else if (line == "PING") {
+        client.println("PONG");
       } else if (line.length() > 0 && line.length() < 64 && line.startsWith("S,")) {
         bool valid = true;
         for (unsigned int i = 0; i < line.length(); i++)
