@@ -50,3 +50,9 @@ Right-click the tray icon and choose **Settings & Connection Statistics** for a 
 - Do not test on secure input/password dialogs. Confirm device use is allowed by organizational policy.
 
 Licensed MIT.
+
+## Diagnostics benchmark
+
+The Windows Settings panel includes **Benchmark (10 seconds)**. It increases authenticated NodeMCU PING/PONG sampling temporarily and reports sample count, average, median, p95 and maximum RTT plus unanswered probes. It does not inject keyboard/mouse activity. Compare results while LOCAL vs REMOTE, while idle vs moving the mouse. **This only measures Windows-to-NodeMCU round trip, not UART or Pico-to-USB latency.** The existing NodeMCU firmware with PING/PONG support is sufficient; no firmware update is required.
+
+A true Pico acknowledgment benchmark requires bidirectional UART: Pico GP0 TX → ESP8266 GPIO3 RX, sharing existing ground. Do not connect this extra wire until matching firmware/protocol support is implemented and tested; ESP8266 UART0 RX is also used for flashing/serial diagnostics.
