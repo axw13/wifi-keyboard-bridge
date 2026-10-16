@@ -31,6 +31,8 @@ sealed class BridgeContext : ApplicationContext
     readonly HashSet<int> held = new();
     readonly HashSet<int> physical = new();
     readonly HashSet<int> swallowed = new();
+    // Keys whose key-down Windows received locally must also have their key-up passed locally.
+    readonly HashSet<int> localDown = new();
     bool remote;
     bool hotkeyLatch;
     readonly SynchronizationContext ui;
@@ -61,9 +63,17 @@ sealed class BridgeContext : ApplicationContext
             return true;
         }
         if (vk == 0x7B && !pressed) hotkeyLatch = false;
+        // Preserve key-up ownership across LOCAL -> REMOTE transitions.
+        // In particular, Ctrl and Alt were pressed locally before the toggle hotkey fired.
+        if (!pressed && localDown.Remove(vk)) return false;
         // Consume corresponding key-up for keys whose key-down was forwarded.
         if (!pressed && swallowed.Remove(vk)) { held.Remove(vk); SendState(); return true; }
-        if (!remote) return false;
+        if (!remote) {
+            if (pressed && !swallowed.Contains(vk)) localDown.Add(vk);
+            return false;
+        }
+        // Auto-repeated key-downs that started in LOCAL must not migrate to REMOTE.
+        if (localDown.Contains(vk)) return false;
         if (!network.Connected) { SwitchLocal(); return false; }
         int usage = HidMap.Key(vk);
         if (usage == 0) return false; // Don't suppress unsupported keys
