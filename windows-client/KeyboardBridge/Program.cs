@@ -59,6 +59,7 @@ sealed class BridgeContext : ApplicationContext
         linkedToggle = preferences.Linked;
         mouseSensitivity = Math.Clamp(preferences.MouseSensitivity, 0.25, 3.0);
         network.SetMouseTuning(mouseSensitivity, preferences.MouseUpdateMs);
+        network.SetAdaptiveMouse(preferences.AdaptiveMouse);
         tray = new NotifyIcon { Icon = System.Drawing.SystemIcons.Application, Visible = true, Text = "Keyboard Bridge: LOCAL" };
         var menu = new ContextMenuStrip();
         menu.Items.Add("Switch keyboard", null, (_, _) => Toggle());
@@ -187,7 +188,7 @@ sealed class BridgeContext : ApplicationContext
                 throw new ArgumentException("Shortcut conflicts with mouse or reserved emergency Ctrl+Alt+F10.");
             toggleVk = vk;
             hotkeyLatch = false;
-            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.MouseUpdateMs));
+            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.ManualMouseInterval, network.AdaptiveMouse));
         }, newSettings =>
         {
             EmergencyLocal();
@@ -202,13 +203,18 @@ sealed class BridgeContext : ApplicationContext
             mouseToggleVk = key;
             linkedToggle = linked;
             mouseHotkeyLatch = false;
-            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.MouseUpdateMs));
+            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.ManualMouseInterval, network.AdaptiveMouse));
         });
         settingsWindow.SetMouseTuning(() => mouseSensitivity, () => network.MouseUpdateMs, (sensitivity, interval) =>
         {
             mouseSensitivity = sensitivity;
             network.SetMouseTuning(sensitivity, interval);
-            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, sensitivity, interval));
+            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, sensitivity, interval, network.AdaptiveMouse));
+        });
+        settingsWindow.SetAdaptiveMouse(network.AdaptiveMouse, enabled =>
+        {
+            network.SetAdaptiveMouse(enabled);
+            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.ManualMouseInterval, enabled));
         });
         settingsWindow.Show();
     }
@@ -325,8 +331,16 @@ sealed class Transport : IDisposable
         int backlog;
         lock (motionLock) backlog = Math.Max(Math.Abs(pendingX), Math.Abs(pendingY));
         int current = MouseUpdateMs;
-        int next = backlog >= 100 ? Math.Min(33, current + 3) :
-            backlog <= 12 && current > target ? Math.Max(target, current - 1) : current;
+        // Large backlog calls for maintaining responsiveness, not slowing the sender.
+        // Back off only when scheduler lateness has remained elevated, then recover slowly.
+        double p95Lateness;
+        lock (timingLock)
+        {
+            var values = schedulerLateness.OrderBy(v => v).ToArray();
+            p95Lateness = values.Length >= 32 ? values[(int)Math.Ceiling(values.Length * .95) - 1] : 0;
+        }
+        int next = backlog < 32 && p95Lateness >= 12 ? Math.Min(33, current + 2) :
+            backlog >= 32 || p95Lateness <= 4 ? Math.Max(target, current - 1) : current;
         if (next != current) Volatile.Write(ref mouseIntervalMs, next);
         Interlocked.Exchange(ref lastAdaptiveAdjustment, now);
     }
