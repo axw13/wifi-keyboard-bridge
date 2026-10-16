@@ -171,6 +171,24 @@ sealed class SettingsWindow : Form
             }
         };
         panel.Controls.Add(launchAtLogin, 1, 23);
+        var export = new Button { Text = "Export diagnostics", AutoSize = true };
+        export.Click += (_, _) =>
+        {
+            using var picker = new SaveFileDialog { Filter = "Text report (*.txt)|*.txt", FileName = "keyboard-bridge-diagnostics.txt" };
+            if (picker.ShowDialog(this) != DialogResult.OK) return;
+            try
+            {
+                File.WriteAllText(picker.FileName,
+                    $"Wi-Fi Keyboard Bridge Diagnostics\\nCaptured: {DateTimeOffset.Now:O}\\n" +
+                    $"Connected: {network.Connected}\\nKeyboard remote: {remote()}\\nMouse remote: {isMouseRemote?.Invoke()}\\n" +
+                    $"Mouse interval target: {network.MouseUpdateMs} ms\\n" +
+                    $"Wi-Fi RTT: {network.RoundTripMs?.ToString("F1") ?? "unavailable"} ms\\n" +
+                    network.BenchmarkStatus() + "\\n" + network.MouseDiagnostics() + "\\n" +
+                    network.SchedulerDiagnostics() + "\\n" + network.EspDiagnostics() + "\\n");
+            }
+            catch (Exception ex) { MessageBox.Show(this, ex.Message, "Export failed"); }
+        };
+        panel.Controls.Add(export, 1, 24);
         updateRate.Items.AddRange(new object[] { "30 Hz (33 ms)", "60 Hz (16 ms)", "90 Hz (11 ms)", "125 Hz (8 ms)" });
         AddRow(panel, 14, "Mouse sensitivity %", sensitivity);
         AddRow(panel, 15, "Mouse update rate", updateRate);
