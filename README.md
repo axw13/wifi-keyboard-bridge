@@ -12,6 +12,15 @@ client, USB HID forwarding, numpad mapping, Pico UART diagnostics, and remote
 anti-idle were tested in the author's setup. Hardware variants and
 platform-specific behavior may differ.
 
+## Application screenshots
+
+The screenshots below show the Windows configuration and monitoring interface.
+Connection details are redacted for public documentation.
+
+| Connection | Diagnostics | Input |
+|---|---|---|
+| ![Connection settings](docs/images/connection.png) | ![Network and Pico diagnostics](docs/images/diagnostics.png) | ![Keyboard, mouse and remote anti-idle controls](docs/images/input.png) |
+
 ## Features
 
 - Independent keyboard and mouse REMOTE/LOCAL switching, or linked mode
