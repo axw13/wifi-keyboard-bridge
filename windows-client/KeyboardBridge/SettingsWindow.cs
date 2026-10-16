@@ -49,6 +49,7 @@ sealed class SettingsWindow : Form
     readonly NumericUpDown sensitivity = new() { Minimum = 25, Maximum = 300, Increment = 10, DecimalPlaces = 0, Width = 90, Value = 100 };
     readonly ComboBox updateRate = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 140 };
     Action<double,int>? saveMouseTuning;
+    readonly CheckBox launchAtLogin = new() { Text = "Start with Windows", AutoSize = true };
     readonly CheckBox linked = new() { Text = "Switch keyboard + mouse together", AutoSize = true };
     Func<bool>? isMouseRemote;
     Func<int>? getMouseHotkey;
@@ -65,14 +66,14 @@ sealed class SettingsWindow : Form
         this.setHotkey = setHotkey;
         Text = "Wi-Fi Keyboard Bridge — Settings";
         Width = 475;
-        Height = 885;
-        MinimumSize = new System.Drawing.Size(475, 885);
+        Height = 940;
+        MinimumSize = new System.Drawing.Size(475, 940);
         MaximizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
 
         var panel = new TableLayoutPanel
         {
-            Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 26,
+            Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 28,
             Padding = new Padding(18), AutoSize = false
         };
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 155));
@@ -159,6 +160,17 @@ sealed class SettingsWindow : Form
         panel.Controls.Add(espDiag, 0, 21);
         panel.SetColumnSpan(espDiag, 2);
         panel.Controls.Add(note, 0, 22);
+        launchAtLogin.Checked = StartupSettings.Enabled;
+        launchAtLogin.CheckedChanged += (_, _) =>
+        {
+            try { StartupSettings.SetEnabled(launchAtLogin.Checked); }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "Startup option");
+                launchAtLogin.Checked = StartupSettings.Enabled;
+            }
+        };
+        panel.Controls.Add(launchAtLogin, 1, 23);
         updateRate.Items.AddRange(new object[] { "30 Hz (33 ms)", "60 Hz (16 ms)", "90 Hz (11 ms)", "125 Hz (8 ms)" });
         AddRow(panel, 14, "Mouse sensitivity %", sensitivity);
         AddRow(panel, 15, "Mouse update rate", updateRate);
