@@ -251,6 +251,10 @@ sealed class Transport : IDisposable
     readonly CancellationTokenSource cts = new();
     volatile bool connected;
     long sentReports;
+    readonly object motionLock = new();
+    int pendingX, pendingY, pendingWheel, mouseButtons;
+    long lastMouseFlush;
+    const int MouseIntervalMs = 16;
     long reconnects;
     long latencyTenths = -1;
     long pingSentTimestamp;
@@ -270,7 +274,42 @@ sealed class Transport : IDisposable
     public bool SendMouse(int buttons, int dx, int dy, int wheel)
     {
         if (!Connected) return false;
-        return queue.TryAdd($"M,{buttons},{dx},{dy},{wheel}");
+        lock (motionLock)
+        {
+            if (dx != 0 || dy != 0)
+            {
+                // Bound pending movement so it cannot produce minutes of stale input.
+                pendingX = Math.Clamp(pendingX + dx, -254, 254);
+                pendingY = Math.Clamp(pendingY + dy, -254, 254);
+                return true;
+            }
+            mouseButtons = buttons;
+            // Button presses/releases and wheel remain immediate and reliable.
+            if (wheel != 0) pendingWheel = Math.Clamp(pendingWheel + wheel, -127, 127);
+            return queue.TryAdd($"M,{buttons},0,0,{Math.Clamp(pendingWheel,-127,127)}") &&
+                ClearPendingWheel();
+        }
+    }
+    bool ClearPendingWheel() { pendingWheel = 0; return true; }
+    void FlushMouseMovement(StreamWriter writer)
+    {
+        // Called on transport worker; at most two frames per 16 ms.
+        int x, y, buttons;
+        lock (motionLock)
+        {
+            x = pendingX; y = pendingY; buttons = mouseButtons;
+            pendingX = 0; pendingY = 0;
+        }
+        while (x != 0 || y != 0)
+        {
+            int dx = Math.Clamp(x, -127, 127), dy = Math.Clamp(y, -127, 127);
+            writer.WriteLine($"M,{buttons},{dx},{dy},0");
+            x -= dx; y -= dy;
+        }
+    }
+    void ClearMouseMotion()
+    {
+        lock (motionLock) { pendingX = pendingY = pendingWheel = mouseButtons = 0; }
     }
     public bool Send(int mods, IReadOnlyList<int> keys)
     {
@@ -313,15 +352,23 @@ sealed class Transport : IDisposable
                     }
                 }, cts.Token);
                 var lastPing = DateTimeOffset.MinValue;
+                lastMouseFlush = Environment.TickCount64;
                 while (!cts.IsCancellationRequested)
                 {
                     if (readReplies.IsFaulted || readReplies.IsCompleted) throw new IOException("Ping response reader stopped");
-                    if (queue.TryTake(out var frame, 100))
+                    if (queue.TryTake(out var frame, 5))
                     {
                         await writer.WriteLineAsync(frame);
                         Interlocked.Increment(ref sentReports);
                     }
-                    else await writer.WriteLineAsync(Volatile.Read(ref last)); // Key-hold keepalive
+                    // Avoid flooding the UART with keyboard keepalives while processing mouse movement.
+                    if (Environment.TickCount64 - lastMouseFlush >= MouseIntervalMs)
+                    {
+                        FlushMouseMovement(writer);
+                        lastMouseFlush = Environment.TickCount64;
+                    }
+                    if (Environment.TickCount64 % 250 < 5)
+                        await writer.WriteLineAsync(Volatile.Read(ref last)); // Key-hold keepalive
                     if (DateTimeOffset.UtcNow - lastPing > TimeSpan.FromSeconds(2))
                     {
                         lastPing = DateTimeOffset.UtcNow;
@@ -337,6 +384,7 @@ sealed class Transport : IDisposable
             finally
             {
                 if (connected) { connected = false; connectedSince = null; Interlocked.Increment(ref reconnects); disconnected(); }
+                ClearMouseMotion();
                 Interlocked.Exchange(ref latencyTenths, -1);
                 Interlocked.Exchange(ref pingSentTimestamp, 0);
                 Volatile.Write(ref last, "S,0,0,0,0,0,0,0");
