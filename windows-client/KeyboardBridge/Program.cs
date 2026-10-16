@@ -276,6 +276,38 @@ sealed class Transport : IDisposable
     long mouseIntervalTotal;
     long mouseIntervalMax;
     long mouseLastSentTick;
+    readonly object timingLock = new();
+    readonly Queue<double> schedulerIntervals = new();
+    readonly Queue<double> schedulerLateness = new();
+    readonly Queue<double> activeReportIntervals = new();
+    const int TimingWindow = 256;
+    static void AddTiming(Queue<double> samples, double value)
+    {
+        if (samples.Count == TimingWindow) samples.Dequeue();
+        samples.Enqueue(value);
+    }
+    static string TimingSummary(Queue<double> samples)
+    {
+        if (samples.Count == 0) return "—";
+        var sorted = samples.OrderBy(v => v).ToArray();
+        return $"{sorted.Average():F1} / {sorted[(int)Math.Ceiling(sorted.Length * .95) - 1]:F1} / {sorted[^1]:F1} ms";
+    }
+    public string SchedulerDiagnostics()
+    {
+        lock (timingLock)
+            return $"Scheduler interval avg/P95/max: {TimingSummary(schedulerIntervals)} | lateness avg/P95/max: {TimingSummary(schedulerLateness)}";
+    }
+    void RecordSchedulerTick(long now, int targetMs)
+    {
+        if (lastMouseFlush == 0) return;
+        var interval = now - lastMouseFlush;
+        if (interval > 100) return; // Exclude suspension or long worker pauses from active pacing window
+        lock (timingLock)
+        {
+            AddTiming(schedulerIntervals, interval);
+            AddTiming(schedulerLateness, Math.Max(0, interval - targetMs));
+        }
+    }
     int espRssi = int.MinValue;
     long espHeap = -1, espFrames = -1, espBytes = -1;
     public string MouseDiagnostics()
@@ -285,7 +317,9 @@ sealed class Transport : IDisposable
         long max = Interlocked.Read(ref mouseIntervalMax);
         int x, y;
         lock (motionLock) { x = pendingX; y = pendingY; }
-        return $"Mouse: {Interlocked.Read(ref mouseReports)} sent | interval avg {(n > 0 ? avg.ToString("F1") : "—")} ms, max {(n > 0 ? max.ToString() : "—")} ms | pending X:{x} Y:{y}";
+        string intervals;
+        lock (timingLock) intervals = TimingSummary(activeReportIntervals);
+        return $"Mouse reports: {Interlocked.Read(ref mouseReports)} | active report gap avg/P95/max: {intervals} | pending X:{x} Y:{y}";
     }
     public string EspDiagnostics()
     {
@@ -413,6 +447,7 @@ sealed class Transport : IDisposable
             {
                 // Gaps above 100 ms are idle pauses, not movement pacing jitter.
                 long interval = now - previous;
+                lock (timingLock) AddTiming(activeReportIntervals, interval);
                 Interlocked.Increment(ref mouseIntervalCount);
                 Interlocked.Add(ref mouseIntervalTotal, interval);
                 long seen;
@@ -489,6 +524,7 @@ sealed class Transport : IDisposable
                 }, cts.Token);
                 var lastPing = DateTimeOffset.MinValue;
                 lastMouseFlush = Environment.TickCount64;
+                lock (timingLock) { schedulerIntervals.Clear(); schedulerLateness.Clear(); activeReportIntervals.Clear(); }
                 long lastKeyboardKeepalive = Environment.TickCount64;
                 long lastTelemetryRequest = Environment.TickCount64;
                 while (!cts.IsCancellationRequested)
@@ -500,10 +536,13 @@ sealed class Transport : IDisposable
                         Interlocked.Increment(ref sentReports);
                     }
                     // Avoid flooding the UART with keyboard keepalives while processing mouse movement.
-                    if (Environment.TickCount64 - lastMouseFlush >= MouseUpdateMs)
+                    int targetMs = MouseUpdateMs;
+                    long mouseTick = Environment.TickCount64;
+                    if (mouseTick - lastMouseFlush >= targetMs)
                     {
+                        RecordSchedulerTick(mouseTick, targetMs);
                         await FlushMouseMovementAsync(writer);
-                        lastMouseFlush = Environment.TickCount64;
+                        lastMouseFlush = mouseTick;
                     }
                     if (Environment.TickCount64 - lastKeyboardKeepalive >= 250)
                     {
