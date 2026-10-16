@@ -1,66 +1,100 @@
 # Wi-Fi Keyboard Bridge
 
-Experimental keyboard and mouse sharing: Windows 11 → Wi-Fi → ESP8266 NodeMCU V3 → UART → Raspberry Pi Pico RP2040 → USB HID → second computer. No software is installed on the receiving PC.
+A Windows keyboard and mouse bridge for a second computer without installing
+software on that computer:
 
-**Status:** The prior fixed-text transport was verified on hardware. This new live-keyboard prototype has **not** yet been compiled or verified end-to-end. Test with Notepad and keep a physical keyboard available.
+**Main Windows PC → Wi-Fi → ESP8266 NodeMCU V3 → UART → Raspberry Pi Pico RP2040 → USB keyboard + mouse HID → receiving PC**
 
-## Mouse support (experimental)
+Developed by [axw13](https://github.com/axw13).
 
-The Windows tray client supports **independent mouse forwarding** (`Ctrl+Alt+F11` by default) and keyboard forwarding (`Ctrl+Alt+F12` by default). In **Settings & Connection Statistics**, both shortcuts can be changed independently. Turn on **Switch keyboard + mouse together** to toggle both with the keyboard shortcut; the mouse shortcut is inactive in linked mode. Mouse forwarding defaults **off** at launch. Keyboard-only behavior remains unchanged until mouse mode is enabled.
+**Project status:** Hardware-tested release-candidate baseline. The Windows
+client, USB HID forwarding, numpad mapping, Pico UART diagnostics, and remote
+anti-idle were tested in the author's setup. Hardware variants and
+platform-specific behavior may differ.
 
-Mouse reports travel as `M,<buttons>,<relativeX>,<relativeY>,<wheel>` and are handled by the Pico default CircuitPython mouse USB HID device. This requires **flashing updated ESP8266 firmware AND copying updated Pico code.py**. Mouse movement is aggregated and paced at **one HID report per update** with an adjustable 30/60/90/125 Hz target rate with bounded deltas, preventing unbounded TCP/UART report queues. Mouse sensitivity is adjustable from **25% to 300%** in the Settings panel and saved locally. Start with 100% at **60 Hz**. Higher rates may increase lag on ESP8266/UART hardware. Button and wheel events bypass movement coalescing. The Windows client now reads **relative mouse movement from Windows Raw Input**, independently of the locally suppressed pointer position; the low-level mouse hook handles click/wheel suppression. This corrects cursor movement snapping back when local pointer events are blocked.  high-DPI, raw-input games, cursor acceleration, multi-monitor edges, and relative movement near display borders may not behave like a true KVM. Test movement, click, scroll and switching in Notepad first and retain a physical mouse on the second computer. The remote mouse is released on disconnect or when switching it off.
+## Features
 
-## Hardware
+- Independent keyboard and mouse REMOTE/LOCAL switching, or linked mode
+- Emergency **Ctrl+Alt+F10** returns both devices to LOCAL
+- Default shortcuts: keyboard **Ctrl+Alt+F12**, mouse **Ctrl+Alt+F11**
+- Raw Input mouse motion, configurable sensitivity and manual 30/60/90/125 Hz
+  update target; adaptive mouse pacing optional and OFF by default
+- Numeric keypad input with scan-code handling for Num Lock
+- Connection telemetry, Wi-Fi RTT graph, Pico UART diagnostic round-trip,
+  benchmarking, exportable diagnostics and rotating local logs
+- Configurable startup, first-run connection wizard, standalone Windows build,
+  single-instance protection and connection-aware tray status
+- Optional **remote anti-idle** mouse mover: when enabled and both inputs
+  are LOCAL, waits for 60 seconds of local inactivity, then sends a tiny
+  movement to the *receiving computer* about every 30 seconds; disabled
+  immediately if either input is REMOTE or the bridge disconnects
+- Optional CircuitPython `boot.py` to hide the CIRCUITPY mass-storage drive
+  while keeping USB keyboard **and mouse** HID
 
-- NodeMCU **TX/GPIO1** → Pico **GP1** (physical pin 2)
-- NodeMCU **GND** → Pico **GND** (physical pin 3)
-- Both boards powered separately via USB. Do not join 5 V or 3.3 V rails.
-- NodeMCU and main PC on a trusted, mutually reachable LAN.
+## Final hardware wiring — one receiving-PC USB connection
 
-See [wiring](docs/wiring.md) and [protocol](docs/protocol.md).
+| Raspberry Pi Pico | NodeMCU V3 | Use |
+|---|---|---|
+| GP1 / pin 2 | TX / GPIO1 | Input UART 115200 baud |
+| GP0 / pin 1 | D5 / GPIO14 | Diagnostic return UART 115200 baud |
+| GND / pin 3 | GND | Common ground |
+| **VBUS / pin 40** | **VIN (verified 5V input)** | Shared power from Pico USB |
 
-## Firmware
+Plug the Pico's USB connector into the receiving computer; NodeMCU draws
+power from Pico VBUS and has **no separate USB power cable** during normal
+operation. This arrangement has been confirmed functional in the author's
+hardware setup.
 
-1. Install CircuitPython 10.x on an original Raspberry Pi Pico.
-2. Copy `firmware/pico/code.py` to `CIRCUITPY/code.py`.
-3. In Arduino IDE install ESP8266 board support and select **NodeMCU 1.0 (ESP-12E Module)**.
-4. Copy `firmware/esp8266/secrets.example.h` to `firmware/esp8266/secrets.h` and configure SSID, password and a unique long token. Never commit secrets.
-5. Upload `firmware/esp8266/esp8266.ino`. Locate its IP from router DHCP leases.
+**Electrical caution:** Confirm the exact NodeMCU board's VIN is a 5V
+power input. Do not wire VBUS to 3V3/GPIO; do not simultaneously attach
+NodeMCU USB power unless its board power-path design is verified. Check
+USB power headroom for ESP8266 Wi-Fi current spikes. Disconnect USB
+before changing wires. See [complete wiring and safety notes](docs/wiring.md).
 
-## Windows 11 client
+## Setup
 
-Install .NET 8 SDK on the main PC, then:
+1. Flash CircuitPython 10.x to the Pico and copy
+   [firmware/pico/code.py](firmware/pico/code.py) to `CIRCUITPY/code.py`.
+2. Install ESP8266 Arduino board support; select NodeMCU 1.0 (ESP-12E).
+   Copy `firmware/esp8266/secrets.example.h` to `secrets.h` and enter
+   the Wi-Fi SSID, password and a long random shared authentication token.
+3. Flash [firmware/esp8266/esp8266.ino](firmware/esp8266/esp8266.ino).
+4. Wire devices as documented and connect the Pico USB to the receiving PC.
+5. On your main Windows PC download the Windows release artifact from
+   [GitHub Releases](https://github.com/axw13/wifi-keyboard-bridge/releases).
+   Launch `KeyboardBridge.exe`, enter NodeMCU IP, port 7777 and matching token
+   in the first-run setup window. No .NET runtime needs to be installed
+   for the self-contained Windows build.
+
+Existing installations with `appsettings.json` next to the executable
+continue to use it; new installations store the configuration under
+`%LOCALAPPDATA%\WifiKeyboardBridge\appsettings.json`.
+Preferences are saved under `%LOCALAPPDATA%\WifiKeyboardBridge\preferences.json`.
+
+Developers can also run the app with .NET 8 SDK:
 
 ```powershell
 cd windows-client/KeyboardBridge
-copy appsettings.example.json appsettings.json
-# Edit Host and Token to match your ESP8266
 dotnet run
 ```
 
-Right-click the tray icon and choose **Settings & Connection Statistics** for a live connection panel. The panel allows editing the NodeMCU host/IP, TCP port, and shared token; **Save connection & restart** saves them to the active appsettings.json and restarts the Windows client in LOCAL mode. Never change the NodeMCU token without flashing the matching firmware. Change the shortcut to **Ctrl+Alt+F1** through **Ctrl+Alt+F12** (default F12); the preference is stored at `%LOCALAPPDATA%\\WifiKeyboardBridge\\preferences.json`. The panel shows connection state, active mode, time since connection, successfully written keyboard-state reports, disconnection count, and a measured Windows-to-NodeMCU TCP round-trip time (RTT) using PING/PONG. **Reflash the updated ESP8266 firmware** to enable RTT readings. The Pico firmware is unchanged. Reports are counted client-side and do **not** indicate delivery. RTT is not end-to-end keystroke latency. The NodeMCU IP, port and token remain in `appsettings.json` and require an app restart to change.\n\nUse the tray menu or **Ctrl+Alt+F12** (or your selected shortcut) to switch between local and remote input. Defaults to local. Publish standalone using `dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true`.
+See [first-run and optional Pico USB storage settings](docs/first-run-and-pico-usb.md),
+[protocol](docs/protocol.md), and [hardware acceptance checklist](docs/v2-acceptance.md).
 
-## Latency tuning\n\nESP8266 and Pico firmware both use **115200 baud** UART. Update **both** devices together; mismatched baud rates cause lost keys. Windows TCP client uses `NoDelay` to avoid Nagle coalescing. Pico polls UART every 0.5 ms; this is an experimental tuning baseline, not a measured latency guarantee. For testing, remove `print()` debug logging from the Pico's USB serial console. Keep the previous firmware available as a rollback.\n\n## Known limitations and safety
+## Limitations and safety
 
-- Experimental: layout mappings assume a US HID keyboard; non-US layouts, dead keys and IMEs may vary.
-- Windows protected desktops, elevated applications and OS-reserved shortcuts may not be forwarded.
-- USB HID boot-keyboard report supports six simultaneous non-modifier keys.
-- TCP/7777 uses a **plaintext shared token**, not encrypted or strong authentication. Trusted LAN only; never expose to the internet.
-- Disconnect watchdog releases keys after an inactivity interval; event loss and transient stuck keys remain possible.
-- Do not test on secure input/password dialogs. Confirm device use is allowed by organizational policy.
+- Only use TCP port 7777 on a **trusted local network**. The shared token
+  is sent in plaintext. Do not expose the port to the public internet.
+- Remote keyboard LED status is not synchronized to the local keyboard's
+  physical lock LEDs.
+- Keyboard uses standard six-nonmodifier-key HID boot reports; some layouts,
+  IMEs, special keys, elevated windows and games can behave differently.
+- PC sleep/lock policies and application idle monitors may ignore the optional
+  anti-idle movement; it is not a guaranteed keep-awake mechanism.
+- Hardware watchdogs release stale keys/buttons on connection failure, but
+  keep an accessible local input recovery method.
+- The optional Pico storage-hiding `boot.py` complicates USB file editing;
+  back up `code.py` first and read the recovery instructions.
 
-Licensed MIT.
-
-## Diagnostics benchmark
-
-The Windows Settings panel includes **Benchmark (10 seconds)**. It increases authenticated NodeMCU PING/PONG sampling temporarily and reports sample count, average, median, p95 and maximum RTT plus unanswered probes. It does not inject keyboard/mouse activity. Compare results while LOCAL vs REMOTE, while idle vs moving the mouse. **This only measures Windows-to-NodeMCU round trip, not UART or Pico-to-USB latency.** The existing NodeMCU firmware with PING/PONG support is sufficient; no firmware update is required.
-
-A true Pico acknowledgment benchmark requires bidirectional UART: Pico GP0 TX → ESP8266 GPIO3 RX, sharing existing ground. Do not connect this extra wire until matching firmware/protocol support is implemented and tested; ESP8266 UART0 RX is also used for flashing/serial diagnostics.
-
-## Live diagnostics (experimental)
-
-The Windows Settings panel shows active mouse movement report count, average and maximum measured intervals between consecutive mouse movement reports (idle gaps over 100 ms excluded), and pending X/Y movement units. These are Windows sender timing measurements, not USB delivery timestamps. Firmware with the authenticated `STAT` command also exposes ESP8266 RSSI (dBm), free heap (KiB), UART forwarded frame count and byte count, refreshed about every 2 seconds. NodeMCU firmware must be updated to see these stats; Pico firmware/wiring do not change. No automatic rate adaptation is enabled. Compare benchmark P95, mouse timing and pending movement while LOCAL and while moving the mouse at the already-working 90 Hz setting.
-
-### Timing diagnostics (Windows client)
-
-The panel now separates the **scheduler tick interval** (how often the sender actually checks/flushes movement) from the **active mouse-report interval** (gaps between actual nonzero movement reports). Both provide rolling average/P95/maximum over the last 256 eligible intervals. **Scheduler lateness** is the positive difference between actual tick spacing and the selected target (e.g. 11 ms at 90 Hz). Mouse idle gaps and long pauses above 100 ms are excluded from these interval summaries. The existing NodeMCU UART counters report forwarded data only; they do not confirm Pico receipt. This change adds diagnostics only and does not change mouse pacing or firmware.
+Built for a controlled personal setup; test hardware and power changes before
+wider deployment.
