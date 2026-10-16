@@ -301,6 +301,35 @@ sealed class Transport : IDisposable
     readonly Queue<double> schedulerIntervals = new();
     readonly Queue<double> schedulerLateness = new();
     readonly Queue<double> activeReportIntervals = new();
+    readonly Queue<double> rttHistory = new();
+    public double[] RttHistory() { lock (timingLock) return rttHistory.ToArray(); }
+    bool adaptiveMouse;
+    int manualMouseInterval = 16;
+    long lastAdaptiveAdjustment;
+    public bool AdaptiveMouse => Volatile.Read(ref adaptiveMouse);
+    public int ManualMouseInterval => Volatile.Read(ref manualMouseInterval);
+    public void SetAdaptiveMouse(bool enabled)
+    {
+        Volatile.Write(ref adaptiveMouse, enabled);
+        Volatile.Write(ref mouseIntervalMs, Volatile.Read(ref manualMouseInterval));
+        Interlocked.Exchange(ref lastAdaptiveAdjustment, Environment.TickCount64);
+    }
+    void UpdateAdaptiveMouse()
+    {
+        if (!AdaptiveMouse || !Connected || BenchmarkRunning) return;
+        long now = Environment.TickCount64;
+        if (now - Interlocked.Read(ref lastAdaptiveAdjustment) < 8000) return;
+        int target = ManualMouseInterval;
+        // Conservative: only back off from the chosen target when movement backlog
+        // persists. Never choose a rate faster than the user selected.
+        int backlog;
+        lock (motionLock) backlog = Math.Max(Math.Abs(pendingX), Math.Abs(pendingY));
+        int current = MouseUpdateMs;
+        int next = backlog >= 100 ? Math.Min(33, current + 3) :
+            backlog <= 12 && current > target ? Math.Max(target, current - 1) : current;
+        if (next != current) Volatile.Write(ref mouseIntervalMs, next);
+        Interlocked.Exchange(ref lastAdaptiveAdjustment, now);
+    }
     const int TimingWindow = 256;
     static void AddTiming(Queue<double> samples, double value)
     {
@@ -358,6 +387,7 @@ sealed class Transport : IDisposable
         lock (motionLock)
         {
             mouseSensitivity = Math.Clamp(sensitivity, 0.25, 3.0);
+            Volatile.Write(ref manualMouseInterval, Math.Clamp(intervalMs, 8, 33));
             Volatile.Write(ref mouseIntervalMs, Math.Clamp(intervalMs, 8, 33));
             fractionalX = fractionalY = 0;
         }
@@ -538,6 +568,7 @@ sealed class Transport : IDisposable
                             {
                                 var ms = (System.Diagnostics.Stopwatch.GetTimestamp() - t) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
                                 Interlocked.Exchange(ref latencyTenths, (long)Math.Round(ms * 10));
+                                lock (timingLock) AddTiming(rttHistory, ms);
                                 if (BenchmarkRunning) lock (benchmarkLock) benchmarkSamples.Add(ms);
                             }
                         }
@@ -545,7 +576,7 @@ sealed class Transport : IDisposable
                 }, cts.Token);
                 var lastPing = DateTimeOffset.MinValue;
                 lastMouseFlush = Environment.TickCount64;
-                lock (timingLock) { schedulerIntervals.Clear(); schedulerLateness.Clear(); activeReportIntervals.Clear(); }
+                lock (timingLock) { schedulerIntervals.Clear(); schedulerLateness.Clear(); activeReportIntervals.Clear(); rttHistory.Clear(); }
                 long lastKeyboardKeepalive = Environment.TickCount64;
                 long lastTelemetryRequest = Environment.TickCount64;
                 while (!cts.IsCancellationRequested)
@@ -587,6 +618,7 @@ sealed class Transport : IDisposable
                         await writer.WriteLineAsync("STAT");
                         lastTelemetryRequest = Environment.TickCount64;
                     }
+                    UpdateAdaptiveMouse();
                     // Avoid blocking the transport thread in 5ms queue waits.
                     // Short async delays produce steadier scheduling at 60 Hz.
                     await Task.Delay(1, cts.Token);
