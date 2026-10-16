@@ -274,9 +274,12 @@ sealed class SettingsWindow : Form
         panel.Controls.Add(hardware, 0, 2);
         panel.SetColumnSpan(hardware, 2);
         panel.RowStyles[2].Height = 74;
+        AddRow(panel, 4, "Version", new Label { Text = typeof(SettingsWindow).Assembly.GetName().Version?.ToString(3) ?? "Development", AutoSize = true });
         AddRow(panel, 5, "Project author", new Label { Text = "axw13", AutoSize = true });
         AddAboutLink(panel, 6, "GitHub profile", "github.com/axw13", "https://github.com/axw13");
         AddAboutLink(panel, 7, "Source repository", "wifi-keyboard-bridge", "https://github.com/axw13/wifi-keyboard-bridge");
+        AddRow(panel, 8, "Diagnostic log", new Label { Text = DiagnosticLog.LogPath, AutoSize = true, MaximumSize = new System.Drawing.Size(315, 0) });
+        panel.RowStyles[8].Height = 68;
     }
 
     static void AddAboutLink(TableLayoutPanel panel, int row, string caption, string display, string url)
