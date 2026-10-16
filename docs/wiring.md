@@ -9,14 +9,16 @@ ESP8266 NodeMCU V3 (ESP8266MOD) + original Raspberry Pi Pico (RP2040).
 
 Power the two boards independently through USB; **do not wire their 5V or 3V3 pins together**. Pico's USB connector goes to the receiving PC; NodeMCU uses a separate USB power source. Secure and insulate wires before permanent use. NodeMCU's hardware TX pin can emit boot messages during reset; the Pico parser ignores invalid lines. Do not attach to machines that prohibit external USB devices.
 
-## Experimental two-way Pico diagnostics (V2 feature branch only)
+## Experimental Pico diagnostic return (V2 feature branch only)
 
-The existing TX connection and common GND remain unchanged. Optional additional signal:
+The existing 115200-baud NodeMCU GPIO1 TX → Pico GP1 RX and shared GND stay exactly as before. Add **one optional 3.3 V signal wire**:
 
 | Pico | NodeMCU | Purpose |
 |---|---|---|
-| GP0 / physical pin 1 (UART TX) | RX / GPIO3 (UART0 RX) | Pico diagnostic acknowledgments at 115200 baud |
+| GP4 / physical pin 6 (diagnostic UART TX) | D5 / GPIO14 (software UART RX) | Pico diagnostic ACK, 38400 baud |
 
-**IMPORTANT HARDWARE CAUTION:** On common NodeMCU V3 boards, GPIO3/RX is already connected to the on-board USB-to-UART adapter TX output. Attaching Pico GP0 TX can create **two actively driven outputs on the same line**, potentially damaging hardware. **Do not connect GP0 directly to NodeMCU GPIO3 while the onboard USB serial adapter TX is connected/active.** Use a UART-receive input that has been verified electrically isolated from the USB adapter, or add appropriate hardware isolation/multiplexing. A NodeMCU board's USB connector being used only for power does **not** guarantee that the adapter's TX pin is high-impedance. Unplugging USB to flash is necessary but not sufficient isolation.
+GP0 is **not** the diagnostic return pin. Do not connect Pico GP4 TX to NodeMCU GPIO3/RX: GPIO3 is already connected to the onboard USB-to-serial converter on common NodeMCU boards, risking electrical output contention. NodeMCU D5/GPIO14 is a separate digital input used by the optional software UART.
 
-Before attempting any return wiring, inspect the specific board schematic or use a different isolated RX GPIO with software serial support. The repository implementation currently assumes GPIO3/UART0 RX; **do not wire it until the electrical contention is resolved**. Both boards must share ground; connect only 3.3 V logic signals, never power rails. The original one-way configuration remains fully functional without this wire; Pico UART telemetry will show no acknowledgments.
+To test: first deploy both matching V2 firmware revisions, with power disconnected before changing wires. Keep separate USB power to each board and the common ground. Only after wiring D5 ← GP4, power up and open the Windows Diagnostics tab. Without the optional wire (or firmware), mouse/keyboard continue functioning normally; Pico telemetry times out. Firmware compatibility and timing must be verified on actual hardware before relying on the telemetry.
+
+**Meaning of the number:** this probe measures on-NodeMCU elapsed time between transmitting a diagnostic request on its hardware UART (115200 baud) and receiving Pico's ACK over the independent return UART (38400 baud). It includes UART serialization, Pico scheduling and ACK transmission. It does **not** measure end-to-end Windows-to-USB input/display latency, and does not prove a HID report was accepted by the host.
