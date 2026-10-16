@@ -18,7 +18,7 @@ void resetSession() {
   line = "";
 }
 void setup() {
-  Serial.begin(9600);  // GPIO1 TX → Pico GP1 RX
+  Serial.begin(115200);  // GPIO1 TX → Pico GP1 RX; must match Pico UART
   WiFi.mode(WIFI_STA);
   WiFi.hostname("wifi-keyboard-bridge");
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
