@@ -34,6 +34,7 @@ static class Program
 sealed class BridgeContext : ApplicationContext
 {
     readonly NotifyIcon tray;
+    readonly AntiIdleMover antiIdle = new();
     readonly System.Windows.Forms.Timer trayTimer = new() { Interval = 1000 };
     readonly Icon disconnectedIcon = TrayStatusIcons.Create(Color.Firebrick);
     readonly Icon localIcon = TrayStatusIcons.Create(Color.SeaGreen);
@@ -73,8 +74,9 @@ sealed class BridgeContext : ApplicationContext
         mouseSensitivity = Math.Clamp(preferences.MouseSensitivity, 0.25, 3.0);
         network.SetMouseTuning(mouseSensitivity, preferences.MouseUpdateMs);
         network.SetAdaptiveMouse(preferences.AdaptiveMouse);
+        antiIdle.Enabled = preferences.AntiIdle;
         tray = new NotifyIcon { Icon = disconnectedIcon, Visible = true, Text = "Wi-Fi Bridge: Connecting..." };
-        trayTimer.Tick += (_, _) => UpdateTray();
+        trayTimer.Tick += (_, _) => { UpdateTray(); antiIdle.Tick(remote, mouseRemote); };
         trayTimer.Start();
         UpdateTray();
         var menu = new ContextMenuStrip();
@@ -225,7 +227,7 @@ sealed class BridgeContext : ApplicationContext
                 throw new ArgumentException("Shortcut conflicts with mouse or reserved emergency Ctrl+Alt+F10.");
             toggleVk = vk;
             hotkeyLatch = false;
-            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.ManualMouseInterval, network.AdaptiveMouse));
+            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.ManualMouseInterval, network.AdaptiveMouse, antiIdle.Enabled));
         }, newSettings =>
         {
             EmergencyLocal();
@@ -239,18 +241,23 @@ sealed class BridgeContext : ApplicationContext
             mouseToggleVk = key;
             linkedToggle = linked;
             mouseHotkeyLatch = false;
-            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.ManualMouseInterval, network.AdaptiveMouse));
+            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.ManualMouseInterval, network.AdaptiveMouse, antiIdle.Enabled));
         });
         settingsWindow.SetMouseTuning(() => mouseSensitivity, () => network.MouseUpdateMs, (sensitivity, interval) =>
         {
             mouseSensitivity = sensitivity;
             network.SetMouseTuning(sensitivity, interval);
-            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, sensitivity, interval, network.AdaptiveMouse));
+            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, sensitivity, interval, network.AdaptiveMouse, antiIdle.Enabled));
         });
         settingsWindow.SetAdaptiveMouse(network.AdaptiveMouse, enabled =>
         {
             network.SetAdaptiveMouse(enabled);
-            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.ManualMouseInterval, enabled));
+            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.ManualMouseInterval, enabled, antiIdle.Enabled));
+        });
+        settingsWindow.SetAntiIdle(antiIdle.Enabled, enabled =>
+        {
+            antiIdle.Enabled = enabled;
+            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.ManualMouseInterval, network.AdaptiveMouse, enabled));
         });
         settingsWindow.Show();
     }
