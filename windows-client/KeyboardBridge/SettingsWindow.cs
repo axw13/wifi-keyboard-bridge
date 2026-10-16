@@ -179,12 +179,12 @@ sealed class SettingsWindow : Form
             try
             {
                 File.WriteAllText(picker.FileName,
-                    $"Wi-Fi Keyboard Bridge Diagnostics\\nCaptured: {DateTimeOffset.Now:O}\\n" +
-                    $"Connected: {network.Connected}\\nKeyboard remote: {remote()}\\nMouse remote: {isMouseRemote?.Invoke()}\\n" +
-                    $"Mouse interval target: {network.MouseUpdateMs} ms\\n" +
-                    $"Wi-Fi RTT: {network.RoundTripMs?.ToString("F1") ?? "unavailable"} ms\\n" +
-                    network.BenchmarkStatus() + "\\n" + network.MouseDiagnostics() + "\\n" +
-                    network.SchedulerDiagnostics() + "\\n" + network.EspDiagnostics() + "\\n");
+                    $"Wi-Fi Keyboard Bridge Diagnostics\nCaptured: {DateTimeOffset.Now:O}\n" +
+                    $"Connected: {network.Connected}\nKeyboard remote: {remote()}\nMouse remote: {isMouseRemote?.Invoke()}\n" +
+                    $"Mouse interval target: {network.MouseUpdateMs} ms\n" +
+                    $"Wi-Fi RTT: {network.RoundTripMs?.ToString("F1") ?? "unavailable"} ms\n" +
+                    network.BenchmarkStatus() + "\n" + network.MouseDiagnostics() + "\n" +
+                    network.SchedulerDiagnostics() + "\n" + network.EspDiagnostics() + "\n");
             }
             catch (Exception ex) { MessageBox.Show(this, ex.Message, "Export failed"); }
         };
