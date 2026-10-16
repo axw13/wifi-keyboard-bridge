@@ -32,7 +32,7 @@ copy appsettings.example.json appsettings.json
 dotnet run
 ```
 
-Use the tray menu or **Ctrl+Alt+F12** to switch between local and remote input. Defaults to local. Publish standalone using `dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true`.
+Right-click the tray icon and choose **Settings & Connection Statistics** for a live connection panel. Change the shortcut to **Ctrl+Alt+F1** through **Ctrl+Alt+F12** (default F12); the preference is stored at `%LOCALAPPDATA%\\WifiKeyboardBridge\\preferences.json`. The panel shows connection state, active mode, time since connection, successfully written keyboard-state reports, and disconnect count. Reports are counted client-side and do **not** indicate delivery or network latency. The NodeMCU IP, port and token remain in `appsettings.json` and require an app restart to change.\n\nUse the tray menu or **Ctrl+Alt+F12** (or your selected shortcut) to switch between local and remote input. Defaults to local. Publish standalone using `dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true`.
 
 ## Latency tuning\n\nESP8266 and Pico firmware both use **115200 baud** UART. Update **both** devices together; mismatched baud rates cause lost keys. Windows TCP client uses `NoDelay` to avoid Nagle coalescing. Pico polls UART every 0.5 ms; this is an experimental tuning baseline, not a measured latency guarantee. For testing, remove `print()` debug logging from the Pico's USB serial console. Keep the previous firmware available as a rollback.\n\n## Known limitations and safety
 
