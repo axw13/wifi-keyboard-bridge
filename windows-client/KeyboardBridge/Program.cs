@@ -76,7 +76,7 @@ sealed class BridgeContext : ApplicationContext
         network.SetAdaptiveMouse(preferences.AdaptiveMouse);
         antiIdle.Enabled = preferences.AntiIdle;
         tray = new NotifyIcon { Icon = disconnectedIcon, Visible = true, Text = "Wi-Fi Bridge: Connecting..." };
-        trayTimer.Tick += (_, _) => { UpdateTray(); antiIdle.Tick(remote, mouseRemote); };
+        trayTimer.Tick += (_, _) => { UpdateTray(); antiIdle.Tick(remote, mouseRemote, network.Connected, dx => network.SendMouse(0, dx, 0, 0)); };
         trayTimer.Start();
         UpdateTray();
         var menu = new ContextMenuStrip();
