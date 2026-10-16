@@ -5,10 +5,10 @@ namespace KeyboardBridge;
 
 static class ConfigStore
 {
-    static readonly string userConfig = Path.Combine(
+    static readonly string userConfig = System.IO.Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "WifiKeyboardBridge", "appsettings.json");
-    static readonly string legacyConfig = Path.Combine(AppContext.BaseDirectory, "appsettings.json");
+    static readonly string legacyConfig = System.IO.Path.Combine(AppContext.BaseDirectory, "appsettings.json");
 
     // Preserve existing installations, but store new configs in a writable user directory.
     public static string Path => File.Exists(legacyConfig) ? legacyConfig : userConfig;
