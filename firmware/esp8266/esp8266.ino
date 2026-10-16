@@ -3,7 +3,7 @@
 #include "secrets.h"  // Create from secrets.example.h; never commit credentials
 
 // Diagnostic return uses isolated GPIO14/D5, not USB-UART GPIO3/RX.
-SoftwareSerial picoDiagnostics(14, -1);  // RX only, 38400 baud
+SoftwareSerial picoDiagnostics(14, -1);  // RX only, 115200 baud
 WiFiServer server(7777);
 WiFiClient client;
 String line;
@@ -60,7 +60,7 @@ void resetSession() {
 }
 void setup() {
   Serial.begin(115200);  // GPIO1 TX → Pico GP1 RX; must match Pico UART
-  picoDiagnostics.begin(38400);  // GPIO14/D5 RX ← Pico GP4 TX (diagnostics only)
+  picoDiagnostics.begin(115200);  // GPIO14/D5 RX ← Pico GP0 TX (diagnostics only)
   WiFi.mode(WIFI_STA);
   WiFi.hostname("wifi-keyboard-bridge");
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
