@@ -34,7 +34,7 @@ dotnet run
 
 Use the tray menu or **Ctrl+Alt+F12** to switch between local and remote input. Defaults to local. Publish standalone using `dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true`.
 
-## Known limitations and safety
+## Latency tuning\n\nESP8266 and Pico firmware both use **115200 baud** UART. Update **both** devices together; mismatched baud rates cause lost keys. Windows TCP client uses `NoDelay` to avoid Nagle coalescing. Pico polls UART every 0.5 ms; this is an experimental tuning baseline, not a measured latency guarantee. For testing, remove `print()` debug logging from the Pico's USB serial console. Keep the previous firmware available as a rollback.\n\n## Known limitations and safety
 
 - Experimental: layout mappings assume a US HID keyboard; non-US layouts, dead keys and IMEs may vary.
 - Windows protected desktops, elevated applications and OS-reserved shortcuts may not be forwarded.
