@@ -101,6 +101,7 @@ sealed class SettingsWindow : Form
         {
             try
             {
+                if (hotkey.SelectedIndex < 0) return;
                 setHotkey(0x70 + hotkey.SelectedIndex);
                 MessageBox.Show(this, "Shortcut saved. Release Ctrl and Alt before switching again.",
                     "Keyboard Bridge", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -141,9 +142,13 @@ sealed class SettingsWindow : Form
             {
                 MessageBox.Show(this, "Use separate F keys, or enable linked switching."); return;
             }
-            saveMousePreferences?.Invoke(0x70 + mouseHotkey.SelectedIndex, linked.Checked);
+            try { saveMousePreferences?.Invoke(0x70 + mouseHotkey.SelectedIndex, linked.Checked); }
+            catch (Exception ex) { MessageBox.Show(this, ex.Message, "Shortcut conflict"); }
         };
         input.Controls.Add(saveMouse, 1, 4);
+        var emergencyNote = new Label { Text = "Emergency LOCAL: Ctrl + Alt + F10 (reserved)", AutoSize = true };
+        input.Controls.Add(emergencyNote, 0, 5);
+        input.SetColumnSpan(emergencyNote, 2);
         var runBenchmark = new Button { Text = "Benchmark (10 seconds)", AutoSize = true };
         runBenchmark.Click += (_, _) =>
         {
