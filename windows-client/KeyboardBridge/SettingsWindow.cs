@@ -3,7 +3,7 @@ using System.Windows.Forms;
 
 namespace KeyboardBridge;
 
-record UserPreferences(int ToggleKey, int MouseToggleKey = 0x7A, bool Linked = false)
+record UserPreferences(int ToggleKey, int MouseToggleKey = 0x7A, bool Linked = false, double MouseSensitivity = 1.0, int MouseUpdateMs = 16)
 {
     public static UserPreferences Load(string path)
     {
@@ -42,6 +42,9 @@ sealed class SettingsWindow : Form
     readonly NumericUpDown port = new() { Minimum = 1, Maximum = 65535, Width = 100 };
     readonly TextBox token = new() { Width = 160, UseSystemPasswordChar = true };
     readonly ComboBox mouseHotkey = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 125 };
+    readonly NumericUpDown sensitivity = new() { Minimum = 25, Maximum = 300, Increment = 10, DecimalPlaces = 0, Width = 90, Value = 100 };
+    readonly ComboBox updateRate = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 140 };
+    Action<double,int>? saveMouseTuning;
     readonly CheckBox linked = new() { Text = "Switch keyboard + mouse together", AutoSize = true };
     Func<bool>? isMouseRemote;
     Func<int>? getMouseHotkey;
@@ -58,14 +61,14 @@ sealed class SettingsWindow : Form
         this.setHotkey = setHotkey;
         Text = "Wi-Fi Keyboard Bridge — Settings";
         Width = 475;
-        Height = 560;
-        MinimumSize = new System.Drawing.Size(475, 560);
+        Height = 660;
+        MinimumSize = new System.Drawing.Size(475, 660);
         MaximizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
 
         var panel = new TableLayoutPanel
         {
-            Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 16,
+            Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 19,
             Padding = new Padding(18), AutoSize = false
         };
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 155));
@@ -136,7 +139,18 @@ sealed class SettingsWindow : Form
             saveMousePreferences?.Invoke(0x70 + mouseHotkey.SelectedIndex, linked.Checked);
         };
         panel.Controls.Add(saveMouse, 1, 13);
-        panel.Controls.Add(note, 0, 14);
+        panel.Controls.Add(note, 0, 17);
+        updateRate.Items.AddRange(new object[] { "30 Hz (33 ms)", "60 Hz (16 ms)", "90 Hz (11 ms)", "125 Hz (8 ms)" });
+        AddRow(panel, 14, "Mouse sensitivity %", sensitivity);
+        AddRow(panel, 15, "Mouse update rate", updateRate);
+        var saveTuning = new Button { Text = "Apply mouse tuning", AutoSize = true };
+        saveTuning.Click += (_, _) =>
+        {
+            int[] intervals = { 33, 16, 11, 8 };
+            if (updateRate.SelectedIndex >= 0)
+                saveMouseTuning?.Invoke((double)sensitivity.Value / 100.0, intervals[updateRate.SelectedIndex]);
+        };
+        panel.Controls.Add(saveTuning, 1, 16);
         panel.SetColumnSpan(note, 2);
         timer.Tick += (_, _) => RefreshStatus();
         timer.Start();
@@ -152,6 +166,17 @@ sealed class SettingsWindow : Form
         for (int n = 1; n <= 12; n++) mouseHotkey.Items.Add("Ctrl + Alt + F" + n);
         mouseHotkey.SelectedIndex = Math.Clamp(mouseKey() - 0x70, 0, 11);
         linked.Checked = linkedMode();
+    }
+
+    public void SetMouseTuning(Func<double> currentSensitivity, Func<int> currentInterval, Action<double,int> apply)
+    {
+        saveMouseTuning = apply;
+        sensitivity.Value = (decimal)Math.Clamp(currentSensitivity() * 100.0, 25, 300);
+        int[] rates = { 33, 16, 11, 8 };
+        int closest = 0;
+        for (int i = 1; i < rates.Length; i++)
+            if (Math.Abs(rates[i] - currentInterval()) < Math.Abs(rates[closest] - currentInterval())) closest = i;
+        updateRate.SelectedIndex = closest;
     }
 
     static void AddRow(TableLayoutPanel p, int row, string title, Control control)
