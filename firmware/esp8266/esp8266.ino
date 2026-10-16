@@ -6,6 +6,8 @@ WiFiClient client;
 String line;
 bool authorized = false;
 unsigned long lastFrame = 0;
+unsigned long serialFrames = 0;
+unsigned long serialBytes = 0;
 
 void releaseKeys() {
   Serial.println("S,0,0,0,0,0,0,0");
@@ -52,6 +54,15 @@ void loop() {
           client.println("ERR");
           client.stop();
         }
+      } else if (line == "STAT") {
+        client.print("STAT,");
+        client.print(WiFi.RSSI());
+        client.print(",");
+        client.print(ESP.getFreeHeap());
+        client.print(",");
+        client.print(serialFrames);
+        client.print(",");
+        client.println(serialBytes);
       } else if (line == "PING") {
         client.println("PONG");
       } else if (line.length() > 0 && line.length() < 64 && (line.startsWith("S,") || line.startsWith("M,"))) {
@@ -60,6 +71,8 @@ void loop() {
           if (!(line[i] == ',' || (line[i] >= '0' && line[i] <= '9') || (line[0] == 'M' && line[i] == '-') || (i == 0 && (line[i] == 'S' || line[i] == 'M')))) valid = false;
         if (valid) {
           Serial.println(line);
+          serialFrames++;
+          serialBytes += line.length() + 2;
           lastFrame = millis();
         }
       }
