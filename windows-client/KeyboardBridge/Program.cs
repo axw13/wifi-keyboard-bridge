@@ -126,6 +126,12 @@ sealed class BridgeContext : ApplicationContext
             toggleVk = vk;
             hotkeyLatch = false;
             UserPreferences.Save(prefPath, new UserPreferences(vk));
+        }, newSettings =>
+        {
+            SwitchLocal();
+            File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "appsettings.json"),
+                JsonSerializer.Serialize(newSettings, new JsonSerializerOptions { WriteIndented = true }));
+            Application.Restart();
         });
         settingsWindow.Show();
     }
@@ -205,6 +211,9 @@ sealed class Transport : IDisposable
     volatile bool connected;
     long sentReports;
     long reconnects;
+    long latencyTenths = -1;
+    long pingSentTimestamp;
+    public double? RoundTripMs => Interlocked.Read(ref latencyTenths) is var value && value >= 0 ? value / 10.0 : null;
     DateTimeOffset? connectedSince;
     public long SentReports => Interlocked.Read(ref sentReports);
     public long Reconnects => Interlocked.Read(ref reconnects);
@@ -241,14 +250,40 @@ sealed class Transport : IDisposable
                     throw new IOException("Authentication failed");
                 connected = true;
                 connectedSince = DateTimeOffset.UtcNow;
+                Interlocked.Exchange(ref latencyTenths, -1);
+                var readReplies = Task.Run(async () =>
+                {
+                    while (!cts.IsCancellationRequested)
+                    {
+                        var response = await reader.ReadLineAsync(cts.Token);
+                        if (response == null) throw new IOException("Connection closed");
+                        if (response == "PONG")
+                        {
+                            var t = Interlocked.Exchange(ref pingSentTimestamp, 0);
+                            if (t != 0)
+                                Interlocked.Exchange(ref latencyTenths,
+                                    (long)Math.Round((System.Diagnostics.Stopwatch.GetTimestamp() - t) * 10000.0 / System.Diagnostics.Stopwatch.Frequency));
+                        }
+                    }
+                }, cts.Token);
+                var lastPing = DateTimeOffset.MinValue;
                 while (!cts.IsCancellationRequested)
                 {
-                    if (queue.TryTake(out var frame, 250))
+                    if (readReplies.IsFaulted || readReplies.IsCompleted) throw new IOException("Ping response reader stopped");
+                    if (queue.TryTake(out var frame, 100))
                     {
                         await writer.WriteLineAsync(frame);
                         Interlocked.Increment(ref sentReports);
                     }
                     else await writer.WriteLineAsync(Volatile.Read(ref last)); // Key-hold keepalive
+                    if (DateTimeOffset.UtcNow - lastPing > TimeSpan.FromSeconds(2))
+                    {
+                        lastPing = DateTimeOffset.UtcNow;
+                        if (Interlocked.Read(ref pingSentTimestamp) != 0)
+                            Interlocked.Exchange(ref latencyTenths, -1); // timed-out / unsupported firmware
+                        Interlocked.Exchange(ref pingSentTimestamp, System.Diagnostics.Stopwatch.GetTimestamp());
+                        await writer.WriteLineAsync("PING");
+                    }
                 }
             }
             catch (OperationCanceledException) { break; }
@@ -256,6 +291,8 @@ sealed class Transport : IDisposable
             finally
             {
                 if (connected) { connected = false; connectedSince = null; Interlocked.Increment(ref reconnects); disconnected(); }
+                Interlocked.Exchange(ref latencyTenths, -1);
+                Interlocked.Exchange(ref pingSentTimestamp, 0);
                 Volatile.Write(ref last, "S,0,0,0,0,0,0,0");
                 while (queue.TryTake(out _)) { }
             }
