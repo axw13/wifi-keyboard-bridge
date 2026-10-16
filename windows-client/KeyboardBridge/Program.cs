@@ -27,6 +27,11 @@ sealed class BridgeContext : ApplicationContext
 {
     readonly NotifyIcon tray;
     readonly KeyboardHook hook;
+    readonly MouseHook mouseHook;
+    bool mouseRemote;
+    int mouseToggleVk;
+    bool linkedToggle;
+    bool mouseHotkeyLatch;
     readonly Transport network;
     readonly HashSet<int> held = new();
     readonly HashSet<int> physical = new();
@@ -44,15 +49,20 @@ sealed class BridgeContext : ApplicationContext
     {
         ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         network = new Transport(cfg, () => ui.Post(_ => SwitchLocal(), null));
-        toggleVk = UserPreferences.Load(prefPath).ToggleKey;
+        var preferences = UserPreferences.Load(prefPath);
+        toggleVk = preferences.ToggleKey;
+        mouseToggleVk = preferences.MouseToggleKey;
+        linkedToggle = preferences.Linked;
         tray = new NotifyIcon { Icon = System.Drawing.SystemIcons.Application, Visible = true, Text = "Keyboard Bridge: LOCAL" };
         var menu = new ContextMenuStrip();
-        menu.Items.Add("Switch Local / Remote", null, (_, _) => Toggle());
+        menu.Items.Add("Switch keyboard", null, (_, _) => Toggle());
+        menu.Items.Add("Switch mouse", null, (_, _) => ToggleMouse());
         menu.Items.Add("Settings && Connection Statistics...", null, (_, _) => ShowSettings(cfg));
         menu.Items.Add("Exit", null, (_, _) => ExitThread());
         tray.ContextMenuStrip = menu;
         tray.DoubleClick += (_, _) => Toggle();
         hook = new KeyboardHook(HandleKey);
+        mouseHook = new MouseHook(HandleMouse);
     }
 
     bool HandleKey(int vk, bool pressed, bool injected)
@@ -61,13 +71,18 @@ sealed class BridgeContext : ApplicationContext
         if (pressed) physical.Add(vk); else physical.Remove(vk);
         bool ctrl = physical.Contains(0xA2) || physical.Contains(0xA3) || physical.Contains(0x11);
         bool alt = physical.Contains(0xA4) || physical.Contains(0xA5) || physical.Contains(0x12);
-        if (vk == toggleVk && pressed && ctrl && alt)
+        if ((vk == toggleVk || (!linkedToggle && vk == mouseToggleVk)) && pressed && ctrl && alt)
         {
-            if (!hotkeyLatch) { hotkeyLatch = true; Toggle(); }
+            if (!hotkeyLatch && !mouseHotkeyLatch)
+            {
+                if (vk == toggleVk) { hotkeyLatch = true; Toggle(); if (linkedToggle) ToggleMouseTo(remote); }
+                else { mouseHotkeyLatch = true; ToggleMouse(); }
+            }
             swallowed.Add(vk);
             return true;
         }
         if (vk == toggleVk && !pressed) hotkeyLatch = false;
+        if (vk == mouseToggleVk && !pressed) mouseHotkeyLatch = false;
         // Preserve key-up ownership across LOCAL -> REMOTE transitions.
         // In particular, Ctrl and Alt were pressed locally before the toggle hotkey fired.
         if (!pressed && localDown.Remove(vk)) return false;
@@ -88,6 +103,22 @@ sealed class BridgeContext : ApplicationContext
         return true;
     }
 
+    bool HandleMouse(int message, int x, int y, int wheel)
+    {
+        if (!mouseRemote) return false;
+        if (!network.Connected) { ToggleMouseTo(false); return false; }
+        return mouseHook.Forward(message, x, y, wheel, (b, dx, dy, w) => network.SendMouse(b, dx, dy, w));
+    }
+    void ToggleMouse() => ToggleMouseTo(!mouseRemote);
+    void ToggleMouseTo(bool enabled)
+    {
+        if (enabled && !network.Connected) return;
+        mouseRemote = enabled;
+        mouseHook.ResetTracking();
+        if (!enabled) network.SendMouse(0, 0, 0, 0);
+        UpdateTray();
+    }
+    void UpdateTray() => tray.Text = "Bridge: K " + (remote ? "REMOTE" : "LOCAL") + " / M " + (mouseRemote ? "REMOTE" : "LOCAL");
     bool SendState()
     {
         int modifiers = 0;
@@ -107,7 +138,7 @@ sealed class BridgeContext : ApplicationContext
         if (!network.Connected) { MessageBox.Show("NodeMCU not connected. Check IP, Wi-Fi and token."); return; }
         held.Clear();
         remote = true;
-        tray.Text = "Keyboard Bridge: REMOTE";
+        UpdateTray();
         SendState();
     }
     void SwitchLocal()
@@ -116,7 +147,7 @@ sealed class BridgeContext : ApplicationContext
         remote = false;
         held.Clear();
         network.Send(0, Array.Empty<int>());
-        tray.Text = "Keyboard Bridge: LOCAL";
+        UpdateTray();
     }
     void ShowSettings(Settings cfg)
     {
@@ -125,7 +156,7 @@ sealed class BridgeContext : ApplicationContext
         {
             toggleVk = vk;
             hotkeyLatch = false;
-            UserPreferences.Save(prefPath, new UserPreferences(vk));
+            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle));
         }, newSettings =>
         {
             SwitchLocal();
@@ -133,13 +164,23 @@ sealed class BridgeContext : ApplicationContext
                 JsonSerializer.Serialize(newSettings, new JsonSerializerOptions { WriteIndented = true }));
             Application.Restart();
         });
+        settingsWindow.SetMouseSettings(() => mouseRemote, () => mouseToggleVk, () => linkedToggle, (key, linked) =>
+        {
+            if (linked && key == toggleVk) key = 0x7A;
+            mouseToggleVk = key;
+            linkedToggle = linked;
+            mouseHotkeyLatch = false;
+            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle));
+        });
         settingsWindow.Show();
     }
     protected override void ExitThreadCore()
     {
         SwitchLocal();
+        ToggleMouseTo(false);
         settingsWindow?.Close();
         hook.Dispose();
+        mouseHook.Dispose();
         network.Dispose();
         tray.Visible = false;
         tray.Dispose();
@@ -225,6 +266,11 @@ sealed class Transport : IDisposable
         this.cfg = cfg;
         this.disconnected = disconnected;
         _ = Task.Run(Run);
+    }
+    public bool SendMouse(int buttons, int dx, int dy, int wheel)
+    {
+        if (!Connected) return false;
+        return queue.TryAdd($"M,{buttons},{dx},{dy},{wheel}");
     }
     public bool Send(int mods, IReadOnlyList<int> keys)
     {
