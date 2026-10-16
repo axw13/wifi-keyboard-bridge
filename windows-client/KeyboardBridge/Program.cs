@@ -48,7 +48,7 @@ sealed class BridgeContext : ApplicationContext
     public BridgeContext(Settings cfg)
     {
         ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
-        network = new Transport(cfg, () => ui.Post(_ => SwitchLocal(), null));
+        network = new Transport(cfg, () => ui.Post(_ => { SwitchLocal(); ToggleMouseTo(false); }, null));
         var preferences = UserPreferences.Load(prefPath);
         toggleVk = preferences.ToggleKey;
         mouseToggleVk = preferences.MouseToggleKey;
