@@ -19,6 +19,17 @@ jobs:
         run: dotnet build windows-client/KeyboardBridge/KeyboardBridge.csproj -c Release
       - name: Publish standalone Windows x64
         run: dotnet publish windows-client/KeyboardBridge/KeyboardBridge.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o release
+      - name: Include setup documentation and firmware in release package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release/firmware/esp8266, release/firmware/pico | Out-Null
+          Copy-Item windows-client/KeyboardBridge/appsettings.example.json release/appsettings.example.json
+          Copy-Item firmware/esp8266/esp8266.ino release/firmware/esp8266/
+          Copy-Item firmware/esp8266/secrets.example.h release/firmware/esp8266/
+          Copy-Item firmware/pico/code.py release/firmware/pico/
+          Copy-Item docs/wiring.md release/wiring.md
+          Copy-Item docs/protocol.md release/protocol.md
+          Copy-Item docs/v2-release.md release/README-FIRST.txt
       - uses: actions/upload-artifact@v4
         with:
           name: keyboard-bridge-win-x64
