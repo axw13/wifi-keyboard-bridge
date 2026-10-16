@@ -4,7 +4,11 @@ import busio
 import time
 import usb_hid
 
-keyboard = next((d for d in usb_hid.devices if d.usage_page == 1 and d.usage == 6), None)
+keyboard = None
+for device in usb_hid.devices:
+    if device.usage_page == 1 and device.usage == 6:
+        keyboard = device
+        break
 if keyboard is None:
     raise RuntimeError("USB HID keyboard device not enabled")
 uart = busio.UART(tx=board.GP0, rx=board.GP1, baudrate=115200, timeout=0)
