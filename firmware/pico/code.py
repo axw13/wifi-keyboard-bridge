@@ -20,6 +20,8 @@ if mouse is None:
     raise RuntimeError("USB HID mouse device not enabled")
 mouse_buttons = 0
 uart = busio.UART(tx=board.GP0, rx=board.GP1, baudrate=115200, timeout=0)
+# Independent return-only diagnostic UART; leave the original HID RX path intact.
+diag_uart = busio.UART(tx=board.GP4, rx=board.GP5, baudrate=38400, timeout=0)
 line = bytearray()
 last_frame = time.monotonic()
 released = bytes(8)
@@ -42,7 +44,7 @@ while True:
                         # not a timestamp for USB HID delivery or display updates.
                         probe = int(parts[1])
                         if 0 <= probe <= 65535:
-                            uart.write(("A,%d\\n" % probe).encode("ascii"))
+                            diag_uart.write(("A,%d\\n" % probe).encode("ascii"))
                     elif len(parts) == 5 and parts[0] == "M":
                         values = [int(v) for v in parts[1:]]
                         buttons, dx, dy, wheel = values
