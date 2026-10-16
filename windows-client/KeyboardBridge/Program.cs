@@ -121,7 +121,11 @@ sealed class BridgeContext : ApplicationContext
         if (enabled && !network.Connected) return;
         mouseRemote = enabled;
         mouseHook.ResetTracking();
-        if (!enabled) network.SendMouse(0, 0, 0, 0);
+        if (!enabled)
+        {
+            network.DiscardPendingMouseMovement();
+            network.SendMouse(0, 0, 0, 0);
+        }
         UpdateTray();
     }
     void UpdateTray() => tray.Text = "Bridge: K " + (remote ? "REMOTE" : "LOCAL") + " / M " + (mouseRemote ? "REMOTE" : "LOCAL");
@@ -333,26 +337,31 @@ sealed class Transport : IDisposable
             return true;
         }
     }
-    void FlushMouseMovement(StreamWriter writer)
+    // Emit at most one HID movement report per interval. Bursting several
+    // reports at once makes pointer motion appear to jump even when RTT is low.
+    async Task FlushMouseMovementAsync(StreamWriter writer)
     {
-        // Called on transport worker; at most two frames per 16 ms.
-        int x, y, buttons;
+        int dx, dy, buttons;
         lock (motionLock)
         {
-            x = pendingX; y = pendingY; buttons = mouseButtons;
-            pendingX = 0; pendingY = 0;
+            dx = Math.Clamp(pendingX, -127, 127);
+            dy = Math.Clamp(pendingY, -127, 127);
+            buttons = mouseButtons;
+            pendingX -= dx;
+            pendingY -= dy;
         }
-        while (x != 0 || y != 0)
-        {
-            int dx = Math.Clamp(x, -127, 127), dy = Math.Clamp(y, -127, 127);
-            writer.WriteLine($"M,{buttons},{dx},{dy},0");
-            x -= dx; y -= dy;
-        }
+        if (dx != 0 || dy != 0)
+            await writer.WriteLineAsync($"M,{buttons},{dx},{dy},0");
     }
-    void ClearMouseMotion()
+    public void DiscardPendingMouseMovement()
     {
-        lock (motionLock) { pendingX = pendingY = pendingWheel = mouseButtons = 0; }
+        lock (motionLock)
+        {
+            pendingX = pendingY = pendingWheel = mouseButtons = 0;
+            fractionalX = fractionalY = 0;
+        }
     }
+    void ClearMouseMotion() => DiscardPendingMouseMovement();
     public bool Send(int mods, IReadOnlyList<int> keys)
     {
         var six = new int[6];
@@ -399,7 +408,7 @@ sealed class Transport : IDisposable
                 while (!cts.IsCancellationRequested)
                 {
                     if (readReplies.IsFaulted || readReplies.IsCompleted) throw new IOException("Ping response reader stopped");
-                    if (queue.TryTake(out var frame, 5))
+                    if (queue.TryTake(out var frame))
                     {
                         await writer.WriteLineAsync(frame);
                         Interlocked.Increment(ref sentReports);
@@ -407,7 +416,7 @@ sealed class Transport : IDisposable
                     // Avoid flooding the UART with keyboard keepalives while processing mouse movement.
                     if (Environment.TickCount64 - lastMouseFlush >= MouseUpdateMs)
                     {
-                        FlushMouseMovement(writer);
+                        await FlushMouseMovementAsync(writer);
                         lastMouseFlush = Environment.TickCount64;
                     }
                     if (Environment.TickCount64 - lastKeyboardKeepalive >= 250)
@@ -423,6 +432,9 @@ sealed class Transport : IDisposable
                         Interlocked.Exchange(ref pingSentTimestamp, System.Diagnostics.Stopwatch.GetTimestamp());
                         await writer.WriteLineAsync("PING");
                     }
+                    // Avoid blocking the transport thread in 5ms queue waits.
+                    // Short async delays produce steadier scheduling at 60 Hz.
+                    await Task.Delay(1, cts.Token);
                 }
             }
             catch (OperationCanceledException) { break; }
