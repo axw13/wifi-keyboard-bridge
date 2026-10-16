@@ -219,7 +219,7 @@ sealed class SettingsWindow : Form
         performance.Controls.Add(saveTuning, 1, 2);
         performance.Controls.Add(adaptive, 1, 3);
         input.Controls.Add(antiIdle, 1, 6);
-        var antiIdleHint = new Label { Text = "After 60 seconds of inactivity, moves the local cursor by 1 pixel about every 30 seconds. Stops whenever keyboard or mouse is REMOTE. Default OFF.", AutoSize = true, MaximumSize = new System.Drawing.Size(340, 0) };
+        var antiIdleHint = new Label { Text = "After 60 seconds of inactivity, moves the local cursor by 1 pixel after each 60-second idle interval. Stops whenever keyboard or mouse is REMOTE. Default OFF.", AutoSize = true, MaximumSize = new System.Drawing.Size(340, 0) };
         input.Controls.Add(antiIdleHint, 0, 7);
         input.SetColumnSpan(antiIdleHint, 2);
         input.RowStyles[7].Height = 70;
