@@ -4,6 +4,8 @@ using System.Text;
 using System.Text.Json;
 using System.Net.Sockets;
 using System.Windows.Forms;
+using System.Threading;
+using System.Drawing;
 
 namespace KeyboardBridge;
 
@@ -14,7 +16,10 @@ static class Program
     [STAThread]
     static void Main()
     {
+        using var oneInstance = new Mutex(true, @"Local\WifiKeyboardBridge_axw13", out bool firstInstance);
+        if (!firstInstance) { MessageBox.Show("Wi-Fi Keyboard Bridge is already running. Check the system tray.", "Already running"); return; }
         ApplicationConfiguration.Initialize();
+        DiagnosticLog.Write("Application starting.");
         var path = Path.Combine(AppContext.BaseDirectory, "appsettings.json");
         if (!File.Exists(path)) { MessageBox.Show("Copy appsettings.example.json to appsettings.json and configure the NodeMCU."); return; }
         var cfg = JsonSerializer.Deserialize<Settings>(File.ReadAllText(path), new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
@@ -26,6 +31,11 @@ static class Program
 sealed class BridgeContext : ApplicationContext
 {
     readonly NotifyIcon tray;
+    readonly System.Windows.Forms.Timer trayTimer = new() { Interval = 1000 };
+    readonly Icon disconnectedIcon = TrayStatusIcons.Create(Color.Firebrick);
+    readonly Icon localIcon = TrayStatusIcons.Create(Color.SeaGreen);
+    readonly Icon remoteIcon = TrayStatusIcons.Create(Color.DeepSkyBlue);
+    bool? lastConnectionState;
     readonly KeyboardHook hook;
     readonly MouseHook mouseHook;
     readonly RawMouseInput rawMouse;
@@ -60,7 +70,10 @@ sealed class BridgeContext : ApplicationContext
         mouseSensitivity = Math.Clamp(preferences.MouseSensitivity, 0.25, 3.0);
         network.SetMouseTuning(mouseSensitivity, preferences.MouseUpdateMs);
         network.SetAdaptiveMouse(preferences.AdaptiveMouse);
-        tray = new NotifyIcon { Icon = System.Drawing.SystemIcons.Application, Visible = true, Text = "Keyboard Bridge: LOCAL" };
+        tray = new NotifyIcon { Icon = disconnectedIcon, Visible = true, Text = "Wi-Fi Bridge: Connecting..." };
+        trayTimer.Tick += (_, _) => UpdateTray();
+        trayTimer.Start();
+        UpdateTray();
         var menu = new ContextMenuStrip();
         menu.Items.Add("Switch keyboard", null, (_, _) => Toggle());
         menu.Items.Add("Switch mouse", null, (_, _) => ToggleMouse());
@@ -148,7 +161,17 @@ sealed class BridgeContext : ApplicationContext
         }
         UpdateTray();
     }
-    void UpdateTray() => tray.Text = "Bridge: K " + (remote ? "REMOTE" : "LOCAL") + " / M " + (mouseRemote ? "REMOTE" : "LOCAL");
+    void UpdateTray()
+    {
+        bool online = network.Connected;
+        if (lastConnectionState != online)
+        {
+            DiagnosticLog.Write(online ? "Connected to NodeMCU." : "NodeMCU disconnected.");
+            lastConnectionState = online;
+        }
+        tray.Icon = !online ? disconnectedIcon : remote || mouseRemote ? remoteIcon : localIcon;
+        tray.Text = "Bridge: " + (!online ? "DISCONNECTED" : "CONNECTED") + " | K " + (remote ? "R" : "L") + " M " + (mouseRemote ? "R" : "L");
+    }
     bool SendState()
     {
         int modifiers = 0;
@@ -221,6 +244,9 @@ sealed class BridgeContext : ApplicationContext
     protected override void ExitThreadCore()
     {
         EmergencyLocal();
+        trayTimer.Stop();
+        trayTimer.Dispose();
+        DiagnosticLog.Write("Application exiting.");
         settingsWindow?.Close();
         hook.Dispose();
         rawMouse.Dispose();
@@ -228,6 +254,9 @@ sealed class BridgeContext : ApplicationContext
         network.Dispose();
         tray.Visible = false;
         tray.Dispose();
+        disconnectedIcon.Dispose();
+        localIcon.Dispose();
+        remoteIcon.Dispose();
         base.ExitThreadCore();
     }
 }
@@ -676,10 +705,10 @@ sealed class Transport : IDisposable
                 }
             }
             catch (OperationCanceledException) { break; }
-            catch { /* retry after delay */ }
+            catch (Exception ex) { DiagnosticLog.Write("Transport retry: " + ex.GetType().Name + ": " + ex.Message); }
             finally
             {
-                if (connected) { connected = false; connectedSince = null; Interlocked.Increment(ref reconnects); disconnected(); }
+                if (connected) { connected = false; connectedSince = null; Interlocked.Increment(ref reconnects); DiagnosticLog.Write("Transport connection ended."); disconnected(); }
                 ClearMouseMotion();
                 Interlocked.Exchange(ref mouseLastSentTick, 0);
                 Volatile.Write(ref espRssi, int.MinValue);
