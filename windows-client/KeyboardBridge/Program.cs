@@ -116,6 +116,17 @@ sealed class BridgeContext : ApplicationContext
         if (vk == 0x79 && !pressed) emergencyHotkeyLatch = false;
         if (vk == toggleVk && !pressed) hotkeyLatch = false;
         if (vk == mouseToggleVk && !pressed) mouseHotkeyLatch = false;
+        // Lock keys must reach Windows as well as the remote HID device: Windows owns
+        // the physical keyboard LEDs and its Num Lock state controls keypad VK translation.
+        // This is a deliberate exception to local suppression while in REMOTE mode.
+        // The host PC's LED is not feedback from the remote PC, so lock states can diverge.
+        if (remote && (vk == 0x90 || vk == 0x91 || vk == 0x14))
+        {
+            if (!network.Connected) { EmergencyLocal(); return false; }
+            if (pressed) held.Add(vk); else held.Remove(vk);
+            if (!SendState()) EmergencyLocal();
+            return false;
+        }
         // Preserve key-up ownership across LOCAL -> REMOTE transitions.
         // In particular, Ctrl and Alt were pressed locally before the toggle hotkey fired.
         if (!pressed && localDown.Remove(vk)) return false;
