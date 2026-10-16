@@ -40,6 +40,7 @@ sealed class SettingsWindow : Form
     readonly Label latency = new() { AutoSize = true };
     readonly Label schedulerDiag = new() { AutoSize = true, MaximumSize = new System.Drawing.Size(405, 0) };
     readonly Label mouseDiag = new() { AutoSize = true, MaximumSize = new System.Drawing.Size(405, 0) };
+    readonly Label picoDiag = new() { AutoSize = true, MaximumSize = new System.Drawing.Size(405, 0) };
     readonly Label espDiag = new() { AutoSize = true, MaximumSize = new System.Drawing.Size(405, 0) };
     readonly Label benchmarkResult = new() { AutoSize = true, MaximumSize = new System.Drawing.Size(395, 0) };
     readonly TextBox host = new() { Width = 160 };
@@ -166,6 +167,8 @@ sealed class SettingsWindow : Form
         diagnostics.SetColumnSpan(schedulerDiag, 2);
         diagnostics.Controls.Add(espDiag, 0, 4);
         diagnostics.SetColumnSpan(espDiag, 2);
+        diagnostics.Controls.Add(picoDiag, 0, 5);
+        diagnostics.SetColumnSpan(picoDiag, 2);
         diagnostics.Controls.Add(note, 0, 10);
         launchAtLogin.Checked = StartupSettings.Enabled;
         launchAtLogin.CheckedChanged += (_, _) =>
@@ -191,7 +194,7 @@ sealed class SettingsWindow : Form
                     $"Mouse interval target: {network.MouseUpdateMs} ms\n" +
                     $"Wi-Fi RTT: {network.RoundTripMs?.ToString("F1") ?? "unavailable"} ms\n" +
                     network.BenchmarkStatus() + "\n" + network.MouseDiagnostics() + "\n" +
-                    network.SchedulerDiagnostics() + "\n" + network.EspDiagnostics() + "\n");
+                    network.SchedulerDiagnostics() + "\n" + network.EspDiagnostics() + "\n" + network.PicoDiagnostics() + "\n");
             }
             catch (Exception ex) { MessageBox.Show(this, ex.Message, "Export failed"); }
         };
@@ -284,6 +287,7 @@ sealed class SettingsWindow : Form
         mouseDiag.Text = network.MouseDiagnostics();
         schedulerDiag.Text = network.SchedulerDiagnostics();
         espDiag.Text = network.EspDiagnostics();
+        picoDiag.Text = network.PicoDiagnostics();
         rttGraph.Samples = network.RttHistory();
     }
 
