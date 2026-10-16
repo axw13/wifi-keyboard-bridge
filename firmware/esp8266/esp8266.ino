@@ -1,6 +1,9 @@
 #include <ESP8266WiFi.h>
+#include <SoftwareSerial.h>
 #include "secrets.h"  // Create from secrets.example.h; never commit credentials
 
+// Diagnostic return uses isolated GPIO14/D5, not USB-UART GPIO3/RX.
+SoftwareSerial picoDiagnostics(14, -1);  // RX only, 38400 baud
 WiFiServer server(7777);
 WiFiClient client;
 String line;
@@ -17,8 +20,8 @@ unsigned long picoProbeTimeouts = 0;
 void readPicoReplies() {
   // Bound processing so telemetry cannot starve keyboard/mouse forwarding.
   int budget = 64;
-  while (budget-- > 0 && Serial.available()) {
-    char c = (char)Serial.read();
+  while (budget-- > 0 && picoDiagnostics.available()) {
+    char c = (char)picoDiagnostics.read();
     if (c == '\r') continue;
     if (c == '\n') {
       if (picoProbePending && picoLine == String("A,") + picoProbeId) {
@@ -57,6 +60,7 @@ void resetSession() {
 }
 void setup() {
   Serial.begin(115200);  // GPIO1 TX → Pico GP1 RX; must match Pico UART
+  picoDiagnostics.begin(38400);  // GPIO14/D5 RX ← Pico GP4 TX (diagnostics only)
   WiFi.mode(WIFI_STA);
   WiFi.hostname("wifi-keyboard-bridge");
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
