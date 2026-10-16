@@ -33,6 +33,7 @@ sealed class BridgeContext : ApplicationContext
     int mouseToggleVk;
     bool linkedToggle;
     bool mouseHotkeyLatch;
+    bool emergencyHotkeyLatch;
     readonly Transport network;
     readonly HashSet<int> held = new();
     readonly HashSet<int> physical = new();
@@ -52,8 +53,9 @@ sealed class BridgeContext : ApplicationContext
         ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         network = new Transport(cfg, () => ui.Post(_ => { SwitchLocal(); ToggleMouseTo(false); }, null));
         var preferences = UserPreferences.Load(prefPath);
-        toggleVk = preferences.ToggleKey;
-        mouseToggleVk = preferences.MouseToggleKey;
+        toggleVk = preferences.ToggleKey == 0x79 ? 0x7B : preferences.ToggleKey;
+        mouseToggleVk = preferences.MouseToggleKey == 0x79 || preferences.MouseToggleKey == toggleVk ? 0x7A : preferences.MouseToggleKey;
+        if (mouseToggleVk == toggleVk) mouseToggleVk = 0x78;
         linkedToggle = preferences.Linked;
         mouseSensitivity = Math.Clamp(preferences.MouseSensitivity, 0.25, 3.0);
         network.SetMouseTuning(mouseSensitivity, preferences.MouseUpdateMs);
@@ -80,7 +82,7 @@ sealed class BridgeContext : ApplicationContext
         bool alt = physical.Contains(0xA4) || physical.Contains(0xA5) || physical.Contains(0x12);
         if (vk == 0x79 && pressed && ctrl && alt) // Ctrl+Alt+F10 emergency LOCAL
         {
-            if (!hotkeyLatch && !mouseHotkeyLatch) EmergencyLocal();
+            if (!emergencyHotkeyLatch) { emergencyHotkeyLatch = true; EmergencyLocal(); }
             swallowed.Add(vk);
             return true;
         }
@@ -94,6 +96,7 @@ sealed class BridgeContext : ApplicationContext
             swallowed.Add(vk);
             return true;
         }
+        if (vk == 0x79 && !pressed) emergencyHotkeyLatch = false;
         if (vk == toggleVk && !pressed) hotkeyLatch = false;
         if (vk == mouseToggleVk && !pressed) mouseHotkeyLatch = false;
         // Preserve key-up ownership across LOCAL -> REMOTE transitions.
@@ -107,7 +110,7 @@ sealed class BridgeContext : ApplicationContext
         }
         // Auto-repeated key-downs that started in LOCAL must not migrate to REMOTE.
         if (localDown.Contains(vk)) return false;
-        if (!network.Connected) { SwitchLocal(); return false; }
+        if (!network.Connected) { EmergencyLocal(); return false; }
         int usage = HidMap.Key(vk);
         if (usage == 0) return false; // Don't suppress unsupported keys
         if (pressed) { held.Add(vk); swallowed.Add(vk); }
@@ -128,7 +131,7 @@ sealed class BridgeContext : ApplicationContext
     bool HandleMouse(int message, int x, int y, int wheel)
     {
         if (!mouseRemote) return false;
-        if (!network.Connected) { ToggleMouseTo(false); return false; }
+        if (!network.Connected) { EmergencyLocal(); return false; }
         return mouseHook.Forward(message, x, y, wheel, (b, dx, dy, w) => network.SendMouse(b, dx, dy, w));
     }
     void ToggleMouse() => ToggleMouseTo(!mouseRemote);
@@ -180,6 +183,8 @@ sealed class BridgeContext : ApplicationContext
         if (settingsWindow != null && !settingsWindow.IsDisposed) { settingsWindow.Activate(); return; }
         settingsWindow = new SettingsWindow(cfg, network, () => remote, () => toggleVk, vk =>
         {
+            if (vk == 0x79 || (!linkedToggle && vk == mouseToggleVk))
+                throw new ArgumentException("Shortcut conflicts with mouse or reserved emergency Ctrl+Alt+F10.");
             toggleVk = vk;
             hotkeyLatch = false;
             UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.MouseUpdateMs));
@@ -192,7 +197,8 @@ sealed class BridgeContext : ApplicationContext
         });
         settingsWindow.SetMouseSettings(() => mouseRemote, () => mouseToggleVk, () => linkedToggle, (key, linked) =>
         {
-            if (linked && key == toggleVk) key = 0x7A;
+            if (key == 0x79 || (!linked && key == toggleVk))
+                throw new ArgumentException("Mouse shortcut conflicts with keyboard or reserved emergency Ctrl+Alt+F10.");
             mouseToggleVk = key;
             linkedToggle = linked;
             mouseHotkeyLatch = false;
