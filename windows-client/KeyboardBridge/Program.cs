@@ -61,6 +61,7 @@ sealed class BridgeContext : ApplicationContext
         var menu = new ContextMenuStrip();
         menu.Items.Add("Switch keyboard", null, (_, _) => Toggle());
         menu.Items.Add("Switch mouse", null, (_, _) => ToggleMouse());
+        menu.Items.Add("Emergency LOCAL (Ctrl+Alt+F10)", null, (_, _) => EmergencyLocal());
         menu.Items.Add("Settings && Connection Statistics...", null, (_, _) => ShowSettings(cfg));
         menu.Items.Add("Exit", null, (_, _) => ExitThread());
         tray.ContextMenuStrip = menu;
@@ -77,6 +78,12 @@ sealed class BridgeContext : ApplicationContext
         if (pressed) physical.Add(vk); else physical.Remove(vk);
         bool ctrl = physical.Contains(0xA2) || physical.Contains(0xA3) || physical.Contains(0x11);
         bool alt = physical.Contains(0xA4) || physical.Contains(0xA5) || physical.Contains(0x12);
+        if (vk == 0x79 && pressed && ctrl && alt) // Ctrl+Alt+F10 emergency LOCAL
+        {
+            if (!hotkeyLatch && !mouseHotkeyLatch) EmergencyLocal();
+            swallowed.Add(vk);
+            return true;
+        }
         if ((vk == toggleVk || (!linkedToggle && vk == mouseToggleVk)) && pressed && ctrl && alt)
         {
             if (!hotkeyLatch && !mouseHotkeyLatch)
@@ -107,6 +114,15 @@ sealed class BridgeContext : ApplicationContext
         else held.Remove(vk);
         if (!SendState()) { SwitchLocal(); return false; }
         return true;
+    }
+
+    void EmergencyLocal()
+    {
+        SwitchLocal();
+        ToggleMouseTo(false);
+        // Explicitly release remote HID state even if input-mode flags were already LOCAL.
+        network.Send(0, Array.Empty<int>());
+        network.SendMouse(0, 0, 0, 0);
     }
 
     bool HandleMouse(int message, int x, int y, int wheel)
@@ -169,7 +185,7 @@ sealed class BridgeContext : ApplicationContext
             UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.MouseUpdateMs));
         }, newSettings =>
         {
-            SwitchLocal();
+            EmergencyLocal();
             File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "appsettings.json"),
                 JsonSerializer.Serialize(newSettings, new JsonSerializerOptions { WriteIndented = true }));
             Application.Restart();
@@ -192,8 +208,7 @@ sealed class BridgeContext : ApplicationContext
     }
     protected override void ExitThreadCore()
     {
-        SwitchLocal();
-        ToggleMouseTo(false);
+        EmergencyLocal();
         settingsWindow?.Close();
         hook.Dispose();
         rawMouse.Dispose();
