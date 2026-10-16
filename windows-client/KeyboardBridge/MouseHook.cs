@@ -17,9 +17,7 @@ sealed class MouseHook : IDisposable
 
     readonly HookProc callback;
     readonly IntPtr hook;
-    Func<int,int,int,int,bool>? sink;
     int buttons;
-    int? lastX, lastY;
     public MouseHook(Func<int,int,int,int,bool> handler)
     {
         this.handler = handler;
@@ -28,39 +26,27 @@ sealed class MouseHook : IDisposable
         if (hook == IntPtr.Zero) throw new System.ComponentModel.Win32Exception();
     }
     readonly Func<int,int,int,int,bool> handler;
-    public void ResetTracking() { lastX = null; lastY = null; buttons = 0; }
+    public void ResetTracking() { buttons = 0; }
 
     // Returns true if forwarded, so the low-level hook suppresses the local event.
     public bool Forward(int msg, int x, int y, int wheel, Func<int,int,int,int,bool> send)
     {
-        int dx = 0, dy = 0;
-        if (msg == 0x200) // WM_MOUSEMOVE
+        if (msg == 0x200) // WM_MOUSEMOVE: RawInputSink handles actual deltas
+            return true;  // Prevent local cursor movement in remote mode
+
+        switch (msg)
         {
-            if (lastX.HasValue)
-            {
-                dx = x - lastX.Value;
-                dy = y - lastY!.Value;
-            }
-            lastX = x;
-            lastY = y;
-            if (dx == 0 && dy == 0) return true;
-        }
-        else
-        {
-            switch(msg)
-            {
-                case 0x201: buttons |= 1; break;
-                case 0x202: buttons &= ~1; break;
-                case 0x204: buttons |= 2; break;
-                case 0x205: buttons &= ~2; break;
-                case 0x207: buttons |= 4; break;
-                case 0x208: buttons &= ~4; break;
-                case 0x20A: wheel = Math.Sign(wheel); break;
-                default: return false;
-            }
+            case 0x201: buttons |= 1; break;
+            case 0x202: buttons &= ~1; break;
+            case 0x204: buttons |= 2; break;
+            case 0x205: buttons &= ~2; break;
+            case 0x207: buttons |= 4; break;
+            case 0x208: buttons &= ~4; break;
+            case 0x20A: wheel = Math.Sign(wheel); break;
+            default: return false;
         }
         // Movement is coalesced and rate-limited by Transport instead of flooding TCP.
-        return send(buttons, dx, dy, wheel);
+        return send(buttons, 0, 0, wheel);
     }
 
     IntPtr OnMouse(int code, IntPtr wParam, IntPtr lParam)
