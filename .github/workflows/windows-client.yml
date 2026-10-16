@@ -1,7 +1,7 @@
 name: Windows client build
 on:
   push:
-    branches: [main, feature/v2-reliability-diagnostics]
+    branches: [main, feature/v2-reliability-diagnostics, feature/v2-setup-icon-usb]
     tags: ['v*']
   pull_request:
   workflow_dispatch:
