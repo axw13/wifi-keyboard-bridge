@@ -259,7 +259,7 @@ sealed class SettingsWindow : Form
 
     static void PopulateAbout(TableLayoutPanel panel)
     {
-        var heading = new Label { Text = "Wi-Fi Keyboard Bridge", Font = new System.Drawing.Font(SystemFonts.DefaultFont.FontFamily, 15, System.Drawing.FontStyle.Bold), AutoSize = true };
+        var heading = new Label { Text = "Wi-Fi Keyboard Bridge", Font = new System.Drawing.Font(System.Drawing.SystemFonts.DefaultFont.FontFamily, 15, System.Drawing.FontStyle.Bold), AutoSize = true };
         panel.Controls.Add(heading, 0, 0);
         panel.SetColumnSpan(heading, 2);
         var description = new Label
