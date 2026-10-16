@@ -65,20 +65,20 @@ sealed class SettingsWindow : Form
         this.getHotkey = getHotkey;
         this.setHotkey = setHotkey;
         Text = "Wi-Fi Keyboard Bridge — Settings";
-        Width = 475;
-        Height = 940;
-        MinimumSize = new System.Drawing.Size(475, 940);
+        Width = 580;
+        Height = 465;
+        MinimumSize = new System.Drawing.Size(540, 420);
         MaximizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
 
-        var panel = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 28,
-            Padding = new Padding(18), AutoSize = false
-        };
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 155));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        Controls.Add(panel);
+        var tabs = new TabControl { Dock = DockStyle.Fill, Padding = new System.Drawing.Point(14, 7) };
+        Controls.Add(tabs);
+        var connection = AddTab(tabs, "Connection");
+        var input = AddTab(tabs, "Input");
+        var performance = AddTab(tabs, "Performance");
+        var diagnostics = AddTab(tabs, "Diagnostics");
+        // Tab pages keep independent row layouts; no more giant vertically scrolling form.
+        var panel = connection;
 
         host.Text = cfg.Host;
         port.Value = cfg.Port;
@@ -86,15 +86,15 @@ sealed class SettingsWindow : Form
         AddRow(panel, 0, "NodeMCU IP / host", host);
         AddRow(panel, 1, "TCP port", port);
         AddRow(panel, 2, "Shared token", token);
-        AddRow(panel, 3, "Connection / mode", state);
-        AddRow(panel, 4, "Session uptime", uptime);
-        AddRow(panel, 5, "Bridge RTT", latency);
-        AddRow(panel, 6, "Reports sent", reports);
-        AddRow(panel, 7, "Disconnections", reconnects);
+        AddRow(connection, 3, "Connection / mode", state);
+        AddRow(connection, 4, "Session uptime", uptime);
+        AddRow(connection, 5, "Bridge RTT", latency);
+        AddRow(connection, 6, "Reports sent", reports);
+        AddRow(connection, 7, "Disconnections", reconnects);
 
         for (int n = 1; n <= 12; n++) hotkey.Items.Add("Ctrl + Alt + F" + n);
         hotkey.SelectedIndex = getHotkey() - 0x70;
-        AddRow(panel, 8, "Switch shortcut", hotkey);
+        AddRow(input, 0, "Keyboard shortcut", hotkey);
 
         var apply = new Button { Text = "Save shortcut", AutoSize = true };
         apply.Click += (_, _) =>
@@ -107,7 +107,7 @@ sealed class SettingsWindow : Form
             }
             catch (Exception ex) { MessageBox.Show(this, ex.Message, "Save failed"); }
         };
-        panel.Controls.Add(apply, 1, 9);
+        input.Controls.Add(apply, 1, 1);
         var saveConnection = new Button { Text = "Save connection & restart", AutoSize = true };
         saveConnection.Click += (_, _) =>
         {
@@ -125,14 +125,14 @@ sealed class SettingsWindow : Form
             try { applyConnection(new Settings(newHost, (int)port.Value, token.Text)); }
             catch (Exception ex) { MessageBox.Show(this, ex.Message, "Unable to save connection settings"); }
         };
-        panel.Controls.Add(saveConnection, 1, 10);
+        connection.Controls.Add(saveConnection, 1, 8);
         var note = new Label
         {
             Text = "RTT is Windows ↔ NodeMCU ping time, not full key-to-screen latency. New firmware required for RTT.",
             AutoSize = true, MaximumSize = new System.Drawing.Size(390, 0)
         };
-        AddRow(panel, 11, "Mouse shortcut", mouseHotkey);
-        panel.Controls.Add(linked, 1, 12);
+        AddRow(input, 2, "Mouse shortcut", mouseHotkey);
+        input.Controls.Add(linked, 1, 3);
         var saveMouse = new Button { Text = "Save mouse options", AutoSize = true };
         saveMouse.Click += (_, _) =>
         {
@@ -143,23 +143,23 @@ sealed class SettingsWindow : Form
             }
             saveMousePreferences?.Invoke(0x70 + mouseHotkey.SelectedIndex, linked.Checked);
         };
-        panel.Controls.Add(saveMouse, 1, 13);
+        input.Controls.Add(saveMouse, 1, 4);
         var runBenchmark = new Button { Text = "Benchmark (10 seconds)", AutoSize = true };
         runBenchmark.Click += (_, _) =>
         {
             try { network.StartBenchmark(); benchmarkResult.Text = "Collecting samples..."; }
             catch (Exception ex) { MessageBox.Show(this, ex.Message, "Benchmark unavailable"); }
         };
-        panel.Controls.Add(runBenchmark, 1, 17);
-        panel.Controls.Add(benchmarkResult, 0, 18);
-        panel.SetColumnSpan(benchmarkResult, 2);
-        panel.Controls.Add(mouseDiag, 0, 19);
-        panel.SetColumnSpan(mouseDiag, 2);
-        panel.Controls.Add(schedulerDiag, 0, 20);
-        panel.SetColumnSpan(schedulerDiag, 2);
-        panel.Controls.Add(espDiag, 0, 21);
-        panel.SetColumnSpan(espDiag, 2);
-        panel.Controls.Add(note, 0, 22);
+        diagnostics.Controls.Add(runBenchmark, 1, 0);
+        diagnostics.Controls.Add(benchmarkResult, 0, 1);
+        diagnostics.SetColumnSpan(benchmarkResult, 2);
+        diagnostics.Controls.Add(mouseDiag, 0, 2);
+        diagnostics.SetColumnSpan(mouseDiag, 2);
+        diagnostics.Controls.Add(schedulerDiag, 0, 3);
+        diagnostics.SetColumnSpan(schedulerDiag, 2);
+        diagnostics.Controls.Add(espDiag, 0, 4);
+        diagnostics.SetColumnSpan(espDiag, 2);
+        diagnostics.Controls.Add(note, 0, 6);
         launchAtLogin.Checked = StartupSettings.Enabled;
         launchAtLogin.CheckedChanged += (_, _) =>
         {
@@ -170,7 +170,7 @@ sealed class SettingsWindow : Form
                 launchAtLogin.Checked = StartupSettings.Enabled;
             }
         };
-        panel.Controls.Add(launchAtLogin, 1, 23);
+        connection.Controls.Add(launchAtLogin, 1, 9);
         var export = new Button { Text = "Export diagnostics", AutoSize = true };
         export.Click += (_, _) =>
         {
@@ -188,10 +188,10 @@ sealed class SettingsWindow : Form
             }
             catch (Exception ex) { MessageBox.Show(this, ex.Message, "Export failed"); }
         };
-        panel.Controls.Add(export, 1, 24);
+        diagnostics.Controls.Add(export, 1, 5);
         updateRate.Items.AddRange(new object[] { "30 Hz (33 ms)", "60 Hz (16 ms)", "90 Hz (11 ms)", "125 Hz (8 ms)" });
-        AddRow(panel, 14, "Mouse sensitivity %", sensitivity);
-        AddRow(panel, 15, "Mouse update rate", updateRate);
+        AddRow(performance, 0, "Mouse sensitivity %", sensitivity);
+        AddRow(performance, 1, "Mouse update rate", updateRate);
         var saveTuning = new Button { Text = "Apply mouse tuning", AutoSize = true };
         saveTuning.Click += (_, _) =>
         {
@@ -199,8 +199,8 @@ sealed class SettingsWindow : Form
             if (updateRate.SelectedIndex >= 0)
                 saveMouseTuning?.Invoke((double)sensitivity.Value / 100.0, intervals[updateRate.SelectedIndex]);
         };
-        panel.Controls.Add(saveTuning, 1, 16);
-        panel.SetColumnSpan(note, 2);
+        performance.Controls.Add(saveTuning, 1, 2);
+        diagnostics.SetColumnSpan(note, 2);
         timer.Tick += (_, _) => RefreshStatus();
         timer.Start();
         RefreshStatus();
@@ -228,9 +228,21 @@ sealed class SettingsWindow : Form
         updateRate.SelectedIndex = closest;
     }
 
+    static TableLayoutPanel AddTab(TabControl tabs, string title)
+    {
+        var page = new TabPage(title) { Padding = new Padding(8) };
+        tabs.TabPages.Add(page);
+        var panel = new TableLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true, ColumnCount = 2, Padding = new Padding(14), RowCount = 12 };
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 170));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        for (int i = 0; i < 12; i++) panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+        page.Controls.Add(panel);
+        return panel;
+    }
+
     static void AddRow(TableLayoutPanel p, int row, string title, Control control)
     {
-        p.RowStyles.Add(new RowStyle(SizeType.Absolute, row == 8 ? 55 : 32));
+        // The tab panel predefines row heights.
         p.Controls.Add(new Label { Text = title, AutoSize = true }, 0, row);
         p.Controls.Add(control, 1, row);
     }
