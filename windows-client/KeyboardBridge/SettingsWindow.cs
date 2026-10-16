@@ -1,9 +1,10 @@
 using System.Text.Json;
+using System.Diagnostics;
 using System.Windows.Forms;
 
 namespace KeyboardBridge;
 
-record UserPreferences(int ToggleKey, int MouseToggleKey = 0x7A, bool Linked = false, double MouseSensitivity = 1.0, int MouseUpdateMs = 16)
+record UserPreferences(int ToggleKey, int MouseToggleKey = 0x7A, bool Linked = false, double MouseSensitivity = 1.0, int MouseUpdateMs = 16, bool AdaptiveMouse = false)
 {
     public static UserPreferences Load(string path)
     {
@@ -40,6 +41,7 @@ sealed class SettingsWindow : Form
     readonly Label latency = new() { AutoSize = true };
     readonly Label schedulerDiag = new() { AutoSize = true, MaximumSize = new System.Drawing.Size(405, 0) };
     readonly Label mouseDiag = new() { AutoSize = true, MaximumSize = new System.Drawing.Size(405, 0) };
+    readonly Label picoDiag = new() { AutoSize = true, MaximumSize = new System.Drawing.Size(405, 0) };
     readonly Label espDiag = new() { AutoSize = true, MaximumSize = new System.Drawing.Size(405, 0) };
     readonly Label benchmarkResult = new() { AutoSize = true, MaximumSize = new System.Drawing.Size(395, 0) };
     readonly TextBox host = new() { Width = 160 };
@@ -49,6 +51,9 @@ sealed class SettingsWindow : Form
     readonly NumericUpDown sensitivity = new() { Minimum = 25, Maximum = 300, Increment = 10, DecimalPlaces = 0, Width = 90, Value = 100 };
     readonly ComboBox updateRate = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 140 };
     Action<double,int>? saveMouseTuning;
+    readonly CheckBox launchAtLogin = new() { Text = "Start with Windows", AutoSize = true };
+    readonly CheckBox adaptive = new() { Text = "Experimental adaptive mouse pacing", AutoSize = true };
+    readonly RttGraph rttGraph = new() { Dock = DockStyle.Fill, Height = 110 };
     readonly CheckBox linked = new() { Text = "Switch keyboard + mouse together", AutoSize = true };
     Func<bool>? isMouseRemote;
     Func<int>? getMouseHotkey;
@@ -64,20 +69,22 @@ sealed class SettingsWindow : Form
         this.getHotkey = getHotkey;
         this.setHotkey = setHotkey;
         Text = "Wi-Fi Keyboard Bridge — Settings";
-        Width = 475;
-        Height = 885;
-        MinimumSize = new System.Drawing.Size(475, 885);
+        Width = 580;
+        Height = 465;
+        MinimumSize = new System.Drawing.Size(540, 420);
         MaximizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
 
-        var panel = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 26,
-            Padding = new Padding(18), AutoSize = false
-        };
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 155));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        Controls.Add(panel);
+        var tabs = new TabControl { Dock = DockStyle.Fill, Padding = new System.Drawing.Point(14, 7) };
+        Controls.Add(tabs);
+        var connection = AddTab(tabs, "Connection");
+        var input = AddTab(tabs, "Input");
+        var performance = AddTab(tabs, "Performance");
+        var diagnostics = AddTab(tabs, "Diagnostics");
+        var about = AddTab(tabs, "About");
+        PopulateAbout(about);
+        // Tab pages keep independent row layouts; no more giant vertically scrolling form.
+        var panel = connection;
 
         host.Text = cfg.Host;
         port.Value = cfg.Port;
@@ -85,28 +92,29 @@ sealed class SettingsWindow : Form
         AddRow(panel, 0, "NodeMCU IP / host", host);
         AddRow(panel, 1, "TCP port", port);
         AddRow(panel, 2, "Shared token", token);
-        AddRow(panel, 3, "Connection / mode", state);
-        AddRow(panel, 4, "Session uptime", uptime);
-        AddRow(panel, 5, "Bridge RTT", latency);
-        AddRow(panel, 6, "Reports sent", reports);
-        AddRow(panel, 7, "Disconnections", reconnects);
+        AddRow(connection, 3, "Connection / mode", state);
+        AddRow(connection, 4, "Session uptime", uptime);
+        AddRow(connection, 5, "Bridge RTT", latency);
+        AddRow(connection, 6, "Reports sent", reports);
+        AddRow(connection, 7, "Disconnections", reconnects);
 
         for (int n = 1; n <= 12; n++) hotkey.Items.Add("Ctrl + Alt + F" + n);
         hotkey.SelectedIndex = getHotkey() - 0x70;
-        AddRow(panel, 8, "Switch shortcut", hotkey);
+        AddRow(input, 0, "Keyboard shortcut", hotkey);
 
         var apply = new Button { Text = "Save shortcut", AutoSize = true };
         apply.Click += (_, _) =>
         {
             try
             {
+                if (hotkey.SelectedIndex < 0) return;
                 setHotkey(0x70 + hotkey.SelectedIndex);
                 MessageBox.Show(this, "Shortcut saved. Release Ctrl and Alt before switching again.",
                     "Keyboard Bridge", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (Exception ex) { MessageBox.Show(this, ex.Message, "Save failed"); }
         };
-        panel.Controls.Add(apply, 1, 9);
+        input.Controls.Add(apply, 1, 1);
         var saveConnection = new Button { Text = "Save connection & restart", AutoSize = true };
         saveConnection.Click += (_, _) =>
         {
@@ -124,14 +132,14 @@ sealed class SettingsWindow : Form
             try { applyConnection(new Settings(newHost, (int)port.Value, token.Text)); }
             catch (Exception ex) { MessageBox.Show(this, ex.Message, "Unable to save connection settings"); }
         };
-        panel.Controls.Add(saveConnection, 1, 10);
+        connection.Controls.Add(saveConnection, 1, 8);
         var note = new Label
         {
             Text = "RTT is Windows ↔ NodeMCU ping time, not full key-to-screen latency. New firmware required for RTT.",
             AutoSize = true, MaximumSize = new System.Drawing.Size(390, 0)
         };
-        AddRow(panel, 11, "Mouse shortcut", mouseHotkey);
-        panel.Controls.Add(linked, 1, 12);
+        AddRow(input, 2, "Mouse shortcut", mouseHotkey);
+        input.Controls.Add(linked, 1, 3);
         var saveMouse = new Button { Text = "Save mouse options", AutoSize = true };
         saveMouse.Click += (_, _) =>
         {
@@ -140,28 +148,66 @@ sealed class SettingsWindow : Form
             {
                 MessageBox.Show(this, "Use separate F keys, or enable linked switching."); return;
             }
-            saveMousePreferences?.Invoke(0x70 + mouseHotkey.SelectedIndex, linked.Checked);
+            try { saveMousePreferences?.Invoke(0x70 + mouseHotkey.SelectedIndex, linked.Checked); }
+            catch (Exception ex) { MessageBox.Show(this, ex.Message, "Shortcut conflict"); }
         };
-        panel.Controls.Add(saveMouse, 1, 13);
+        input.Controls.Add(saveMouse, 1, 4);
+        var emergencyNote = new Label { Text = "Emergency LOCAL: Ctrl + Alt + F10 (reserved)", AutoSize = true };
+        input.Controls.Add(emergencyNote, 0, 5);
+        input.SetColumnSpan(emergencyNote, 2);
         var runBenchmark = new Button { Text = "Benchmark (10 seconds)", AutoSize = true };
         runBenchmark.Click += (_, _) =>
         {
             try { network.StartBenchmark(); benchmarkResult.Text = "Collecting samples..."; }
             catch (Exception ex) { MessageBox.Show(this, ex.Message, "Benchmark unavailable"); }
         };
-        panel.Controls.Add(runBenchmark, 1, 17);
-        panel.Controls.Add(benchmarkResult, 0, 18);
-        panel.SetColumnSpan(benchmarkResult, 2);
-        panel.Controls.Add(mouseDiag, 0, 19);
-        panel.SetColumnSpan(mouseDiag, 2);
-        panel.Controls.Add(schedulerDiag, 0, 20);
-        panel.SetColumnSpan(schedulerDiag, 2);
-        panel.Controls.Add(espDiag, 0, 21);
-        panel.SetColumnSpan(espDiag, 2);
-        panel.Controls.Add(note, 0, 22);
+        diagnostics.Controls.Add(runBenchmark, 1, 0);
+        diagnostics.Controls.Add(benchmarkResult, 0, 1);
+        diagnostics.SetColumnSpan(benchmarkResult, 2);
+        diagnostics.Controls.Add(mouseDiag, 0, 2);
+        diagnostics.SetColumnSpan(mouseDiag, 2);
+        diagnostics.Controls.Add(schedulerDiag, 0, 3);
+        diagnostics.SetColumnSpan(schedulerDiag, 2);
+        diagnostics.Controls.Add(espDiag, 0, 4);
+        diagnostics.SetColumnSpan(espDiag, 2);
+        diagnostics.Controls.Add(picoDiag, 0, 5);
+        diagnostics.SetColumnSpan(picoDiag, 2);
+        diagnostics.Controls.Add(note, 0, 10);
+        launchAtLogin.Checked = StartupSettings.Enabled;
+        launchAtLogin.CheckedChanged += (_, _) =>
+        {
+            try { StartupSettings.SetEnabled(launchAtLogin.Checked); }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "Startup option");
+                launchAtLogin.Checked = StartupSettings.Enabled;
+            }
+        };
+        connection.Controls.Add(launchAtLogin, 1, 9);
+        var export = new Button { Text = "Export diagnostics", AutoSize = true };
+        export.Click += (_, _) =>
+        {
+            using var picker = new SaveFileDialog { Filter = "Text report (*.txt)|*.txt", FileName = "keyboard-bridge-diagnostics.txt" };
+            if (picker.ShowDialog(this) != DialogResult.OK) return;
+            try
+            {
+                File.WriteAllText(picker.FileName,
+                    $"Wi-Fi Keyboard Bridge Diagnostics\nCaptured: {DateTimeOffset.Now:O}\n" +
+                    $"Connected: {network.Connected}\nKeyboard remote: {remote()}\nMouse remote: {isMouseRemote?.Invoke()}\n" +
+                    $"Mouse interval target: {network.MouseUpdateMs} ms\n" +
+                    $"Wi-Fi RTT: {network.RoundTripMs?.ToString("F1") ?? "unavailable"} ms\n" +
+                    network.BenchmarkStatus() + "\n" + network.MouseDiagnostics() + "\n" +
+                    network.SchedulerDiagnostics() + "\n" + network.EspDiagnostics() + "\n" + network.PicoDiagnostics() + "\n");
+            }
+            catch (Exception ex) { MessageBox.Show(this, ex.Message, "Export failed"); }
+        };
+        diagnostics.Controls.Add(export, 1, 9);
+        diagnostics.Controls.Add(rttGraph, 0, 6);
+        diagnostics.SetColumnSpan(rttGraph, 2);
+        diagnostics.RowStyles[6].Height = 120;
         updateRate.Items.AddRange(new object[] { "30 Hz (33 ms)", "60 Hz (16 ms)", "90 Hz (11 ms)", "125 Hz (8 ms)" });
-        AddRow(panel, 14, "Mouse sensitivity %", sensitivity);
-        AddRow(panel, 15, "Mouse update rate", updateRate);
+        AddRow(performance, 0, "Mouse sensitivity %", sensitivity);
+        AddRow(performance, 1, "Mouse update rate", updateRate);
         var saveTuning = new Button { Text = "Apply mouse tuning", AutoSize = true };
         saveTuning.Click += (_, _) =>
         {
@@ -169,8 +215,15 @@ sealed class SettingsWindow : Form
             if (updateRate.SelectedIndex >= 0)
                 saveMouseTuning?.Invoke((double)sensitivity.Value / 100.0, intervals[updateRate.SelectedIndex]);
         };
-        panel.Controls.Add(saveTuning, 1, 16);
-        panel.SetColumnSpan(note, 2);
+        performance.Controls.Add(saveTuning, 1, 2);
+        performance.Controls.Add(adaptive, 1, 3);
+        var adaptiveHint = new Label { Text = "Default OFF. Never exceeds your chosen speed. Changes apply only after 8-second evaluation windows.", AutoSize = true, MaximumSize = new System.Drawing.Size(330, 0) };
+        performance.Controls.Add(adaptiveHint, 0, 4);
+        performance.SetColumnSpan(adaptiveHint, 2);
+        var effectiveRate = new Label { AutoSize = true };
+        performance.Controls.Add(effectiveRate, 1, 5);
+        timer.Tick += (_, _) => effectiveRate.Text = $"Effective: {network.MouseUpdateMs} ms (manual {network.ManualMouseInterval} ms)";
+        diagnostics.SetColumnSpan(note, 2);
         timer.Tick += (_, _) => RefreshStatus();
         timer.Start();
         RefreshStatus();
@@ -187,6 +240,12 @@ sealed class SettingsWindow : Form
         linked.Checked = linkedMode();
     }
 
+    public void SetAdaptiveMouse(bool enabled, Action<bool> apply)
+    {
+        adaptive.Checked = enabled;
+        adaptive.CheckedChanged += (_, _) => apply(adaptive.Checked);
+    }
+
     public void SetMouseTuning(Func<double> currentSensitivity, Func<int> currentInterval, Action<double,int> apply)
     {
         saveMouseTuning = apply;
@@ -198,9 +257,57 @@ sealed class SettingsWindow : Form
         updateRate.SelectedIndex = closest;
     }
 
+    static void PopulateAbout(TableLayoutPanel panel)
+    {
+        var heading = new Label { Text = "Wi-Fi Keyboard Bridge", Font = new System.Drawing.Font(System.Drawing.SystemFonts.DefaultFont.FontFamily, 15, System.Drawing.FontStyle.Bold), AutoSize = true };
+        panel.Controls.Add(heading, 0, 0);
+        panel.SetColumnSpan(heading, 2);
+        var description = new Label
+        {
+            Text = "Share keyboard and mouse input from a Windows PC with a second computer over a trusted Wi-Fi network, using a NodeMCU ESP8266 and a Raspberry Pi Pico as a USB HID device.",
+            AutoSize = true, MaximumSize = new System.Drawing.Size(470, 0)
+        };
+        panel.Controls.Add(description, 0, 1);
+        panel.SetColumnSpan(description, 2);
+        panel.RowStyles[1].Height = 66;
+        var hardware = new Label { Text = "Hardware: ESP8266 NodeMCU + Raspberry Pi Pico (RP2040)\nWindows client: .NET 8 / WinForms\nEmergency LOCAL: Ctrl + Alt + F10", AutoSize = true };
+        panel.Controls.Add(hardware, 0, 2);
+        panel.SetColumnSpan(hardware, 2);
+        panel.RowStyles[2].Height = 74;
+        AddRow(panel, 4, "Version", new Label { Text = typeof(SettingsWindow).Assembly.GetName().Version?.ToString(3) ?? "Development", AutoSize = true });
+        AddRow(panel, 5, "Project author", new Label { Text = "axw13", AutoSize = true });
+        AddAboutLink(panel, 6, "GitHub profile", "github.com/axw13", "https://github.com/axw13");
+        AddAboutLink(panel, 7, "Source repository", "wifi-keyboard-bridge", "https://github.com/axw13/wifi-keyboard-bridge");
+        AddRow(panel, 8, "Diagnostic log", new Label { Text = DiagnosticLog.LogPath, AutoSize = true, MaximumSize = new System.Drawing.Size(315, 0) });
+        panel.RowStyles[8].Height = 68;
+    }
+
+    static void AddAboutLink(TableLayoutPanel panel, int row, string caption, string display, string url)
+    {
+        var link = new LinkLabel { Text = display, AutoSize = true };
+        link.LinkClicked += (_, _) =>
+        {
+            try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); }
+            catch (Exception ex) { MessageBox.Show(ex.Message, "Unable to open link"); }
+        };
+        AddRow(panel, row, caption, link);
+    }
+
+    static TableLayoutPanel AddTab(TabControl tabs, string title)
+    {
+        var page = new TabPage(title) { Padding = new Padding(8) };
+        tabs.TabPages.Add(page);
+        var panel = new TableLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true, ColumnCount = 2, Padding = new Padding(14), RowCount = 12 };
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 170));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        for (int i = 0; i < 12; i++) panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+        page.Controls.Add(panel);
+        return panel;
+    }
+
     static void AddRow(TableLayoutPanel p, int row, string title, Control control)
     {
-        p.RowStyles.Add(new RowStyle(SizeType.Absolute, row == 8 ? 55 : 32));
+        // The tab panel predefines row heights.
         p.Controls.Add(new Label { Text = title, AutoSize = true }, 0, row);
         p.Controls.Add(control, 1, row);
     }
@@ -219,6 +326,8 @@ sealed class SettingsWindow : Form
         mouseDiag.Text = network.MouseDiagnostics();
         schedulerDiag.Text = network.SchedulerDiagnostics();
         espDiag.Text = network.EspDiagnostics();
+        picoDiag.Text = network.PicoDiagnostics();
+        rttGraph.Samples = network.RttHistory();
     }
 
     protected override void OnFormClosed(FormClosedEventArgs e)

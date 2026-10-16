@@ -4,6 +4,8 @@ using System.Text;
 using System.Text.Json;
 using System.Net.Sockets;
 using System.Windows.Forms;
+using System.Threading;
+using System.Drawing;
 
 namespace KeyboardBridge;
 
@@ -14,7 +16,10 @@ static class Program
     [STAThread]
     static void Main()
     {
+        using var oneInstance = new Mutex(true, @"Local\WifiKeyboardBridge_axw13", out bool firstInstance);
+        if (!firstInstance) { MessageBox.Show("Wi-Fi Keyboard Bridge is already running. Check the system tray.", "Already running"); return; }
         ApplicationConfiguration.Initialize();
+        DiagnosticLog.Write("Application starting.");
         var path = Path.Combine(AppContext.BaseDirectory, "appsettings.json");
         if (!File.Exists(path)) { MessageBox.Show("Copy appsettings.example.json to appsettings.json and configure the NodeMCU."); return; }
         var cfg = JsonSerializer.Deserialize<Settings>(File.ReadAllText(path), new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
@@ -26,6 +31,11 @@ static class Program
 sealed class BridgeContext : ApplicationContext
 {
     readonly NotifyIcon tray;
+    readonly System.Windows.Forms.Timer trayTimer = new() { Interval = 1000 };
+    readonly Icon disconnectedIcon = TrayStatusIcons.Create(Color.Firebrick);
+    readonly Icon localIcon = TrayStatusIcons.Create(Color.SeaGreen);
+    readonly Icon remoteIcon = TrayStatusIcons.Create(Color.DeepSkyBlue);
+    bool? lastConnectionState;
     readonly KeyboardHook hook;
     readonly MouseHook mouseHook;
     readonly RawMouseInput rawMouse;
@@ -33,6 +43,7 @@ sealed class BridgeContext : ApplicationContext
     int mouseToggleVk;
     bool linkedToggle;
     bool mouseHotkeyLatch;
+    bool emergencyHotkeyLatch;
     readonly Transport network;
     readonly HashSet<int> held = new();
     readonly HashSet<int> physical = new();
@@ -52,15 +63,21 @@ sealed class BridgeContext : ApplicationContext
         ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         network = new Transport(cfg, () => ui.Post(_ => { SwitchLocal(); ToggleMouseTo(false); }, null));
         var preferences = UserPreferences.Load(prefPath);
-        toggleVk = preferences.ToggleKey;
-        mouseToggleVk = preferences.MouseToggleKey;
+        toggleVk = preferences.ToggleKey == 0x79 ? 0x7B : preferences.ToggleKey;
+        mouseToggleVk = preferences.MouseToggleKey == 0x79 || preferences.MouseToggleKey == toggleVk ? 0x7A : preferences.MouseToggleKey;
+        if (mouseToggleVk == toggleVk) mouseToggleVk = 0x78;
         linkedToggle = preferences.Linked;
         mouseSensitivity = Math.Clamp(preferences.MouseSensitivity, 0.25, 3.0);
         network.SetMouseTuning(mouseSensitivity, preferences.MouseUpdateMs);
-        tray = new NotifyIcon { Icon = System.Drawing.SystemIcons.Application, Visible = true, Text = "Keyboard Bridge: LOCAL" };
+        network.SetAdaptiveMouse(preferences.AdaptiveMouse);
+        tray = new NotifyIcon { Icon = disconnectedIcon, Visible = true, Text = "Wi-Fi Bridge: Connecting..." };
+        trayTimer.Tick += (_, _) => UpdateTray();
+        trayTimer.Start();
+        UpdateTray();
         var menu = new ContextMenuStrip();
         menu.Items.Add("Switch keyboard", null, (_, _) => Toggle());
         menu.Items.Add("Switch mouse", null, (_, _) => ToggleMouse());
+        menu.Items.Add("Emergency LOCAL (Ctrl+Alt+F10)", null, (_, _) => EmergencyLocal());
         menu.Items.Add("Settings && Connection Statistics...", null, (_, _) => ShowSettings(cfg));
         menu.Items.Add("Exit", null, (_, _) => ExitThread());
         tray.ContextMenuStrip = menu;
@@ -77,6 +94,12 @@ sealed class BridgeContext : ApplicationContext
         if (pressed) physical.Add(vk); else physical.Remove(vk);
         bool ctrl = physical.Contains(0xA2) || physical.Contains(0xA3) || physical.Contains(0x11);
         bool alt = physical.Contains(0xA4) || physical.Contains(0xA5) || physical.Contains(0x12);
+        if (vk == 0x79 && pressed && ctrl && alt) // Ctrl+Alt+F10 emergency LOCAL
+        {
+            if (!emergencyHotkeyLatch) { emergencyHotkeyLatch = true; EmergencyLocal(); }
+            swallowed.Add(vk);
+            return true;
+        }
         if ((vk == toggleVk || (!linkedToggle && vk == mouseToggleVk)) && pressed && ctrl && alt)
         {
             if (!hotkeyLatch && !mouseHotkeyLatch)
@@ -87,6 +110,7 @@ sealed class BridgeContext : ApplicationContext
             swallowed.Add(vk);
             return true;
         }
+        if (vk == 0x79 && !pressed) emergencyHotkeyLatch = false;
         if (vk == toggleVk && !pressed) hotkeyLatch = false;
         if (vk == mouseToggleVk && !pressed) mouseHotkeyLatch = false;
         // Preserve key-up ownership across LOCAL -> REMOTE transitions.
@@ -100,7 +124,7 @@ sealed class BridgeContext : ApplicationContext
         }
         // Auto-repeated key-downs that started in LOCAL must not migrate to REMOTE.
         if (localDown.Contains(vk)) return false;
-        if (!network.Connected) { SwitchLocal(); return false; }
+        if (!network.Connected) { EmergencyLocal(); return false; }
         int usage = HidMap.Key(vk);
         if (usage == 0) return false; // Don't suppress unsupported keys
         if (pressed) { held.Add(vk); swallowed.Add(vk); }
@@ -109,10 +133,19 @@ sealed class BridgeContext : ApplicationContext
         return true;
     }
 
+    void EmergencyLocal()
+    {
+        SwitchLocal();
+        ToggleMouseTo(false);
+        // Explicitly release remote HID state even if input-mode flags were already LOCAL.
+        network.Send(0, Array.Empty<int>());
+        network.SendMouse(0, 0, 0, 0);
+    }
+
     bool HandleMouse(int message, int x, int y, int wheel)
     {
         if (!mouseRemote) return false;
-        if (!network.Connected) { ToggleMouseTo(false); return false; }
+        if (!network.Connected) { EmergencyLocal(); return false; }
         return mouseHook.Forward(message, x, y, wheel, (b, dx, dy, w) => network.SendMouse(b, dx, dy, w));
     }
     void ToggleMouse() => ToggleMouseTo(!mouseRemote);
@@ -128,7 +161,17 @@ sealed class BridgeContext : ApplicationContext
         }
         UpdateTray();
     }
-    void UpdateTray() => tray.Text = "Bridge: K " + (remote ? "REMOTE" : "LOCAL") + " / M " + (mouseRemote ? "REMOTE" : "LOCAL");
+    void UpdateTray()
+    {
+        bool online = network.Connected;
+        if (lastConnectionState != online)
+        {
+            DiagnosticLog.Write(online ? "Connected to NodeMCU." : "NodeMCU disconnected.");
+            lastConnectionState = online;
+        }
+        tray.Icon = !online ? disconnectedIcon : remote || mouseRemote ? remoteIcon : localIcon;
+        tray.Text = "Bridge: " + (!online ? "DISCONNECTED" : "CONNECTED") + " | K " + (remote ? "R" : "L") + " M " + (mouseRemote ? "R" : "L");
+    }
     bool SendState()
     {
         int modifiers = 0;
@@ -164,36 +207,46 @@ sealed class BridgeContext : ApplicationContext
         if (settingsWindow != null && !settingsWindow.IsDisposed) { settingsWindow.Activate(); return; }
         settingsWindow = new SettingsWindow(cfg, network, () => remote, () => toggleVk, vk =>
         {
+            if (vk == 0x79 || (!linkedToggle && vk == mouseToggleVk))
+                throw new ArgumentException("Shortcut conflicts with mouse or reserved emergency Ctrl+Alt+F10.");
             toggleVk = vk;
             hotkeyLatch = false;
-            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.MouseUpdateMs));
+            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.ManualMouseInterval, network.AdaptiveMouse));
         }, newSettings =>
         {
-            SwitchLocal();
+            EmergencyLocal();
             File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "appsettings.json"),
                 JsonSerializer.Serialize(newSettings, new JsonSerializerOptions { WriteIndented = true }));
             Application.Restart();
         });
         settingsWindow.SetMouseSettings(() => mouseRemote, () => mouseToggleVk, () => linkedToggle, (key, linked) =>
         {
-            if (linked && key == toggleVk) key = 0x7A;
+            if (key == 0x79 || (!linked && key == toggleVk))
+                throw new ArgumentException("Mouse shortcut conflicts with keyboard or reserved emergency Ctrl+Alt+F10.");
             mouseToggleVk = key;
             linkedToggle = linked;
             mouseHotkeyLatch = false;
-            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.MouseUpdateMs));
+            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.ManualMouseInterval, network.AdaptiveMouse));
         });
         settingsWindow.SetMouseTuning(() => mouseSensitivity, () => network.MouseUpdateMs, (sensitivity, interval) =>
         {
             mouseSensitivity = sensitivity;
             network.SetMouseTuning(sensitivity, interval);
-            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, sensitivity, interval));
+            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, sensitivity, interval, network.AdaptiveMouse));
+        });
+        settingsWindow.SetAdaptiveMouse(network.AdaptiveMouse, enabled =>
+        {
+            network.SetAdaptiveMouse(enabled);
+            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.ManualMouseInterval, enabled));
         });
         settingsWindow.Show();
     }
     protected override void ExitThreadCore()
     {
-        SwitchLocal();
-        ToggleMouseTo(false);
+        EmergencyLocal();
+        trayTimer.Stop();
+        trayTimer.Dispose();
+        DiagnosticLog.Write("Application exiting.");
         settingsWindow?.Close();
         hook.Dispose();
         rawMouse.Dispose();
@@ -201,6 +254,9 @@ sealed class BridgeContext : ApplicationContext
         network.Dispose();
         tray.Visible = false;
         tray.Dispose();
+        disconnectedIcon.Dispose();
+        localIcon.Dispose();
+        remoteIcon.Dispose();
         base.ExitThreadCore();
     }
 }
@@ -280,6 +336,56 @@ sealed class Transport : IDisposable
     readonly Queue<double> schedulerIntervals = new();
     readonly Queue<double> schedulerLateness = new();
     readonly Queue<double> activeReportIntervals = new();
+    readonly Queue<double> rttHistory = new();
+    readonly Queue<double> picoHistory = new();
+    long picoLastAckTick;
+    int picoProbeId;
+    int picoTimeouts;
+    public string PicoDiagnostics()
+    {
+        lock (timingLock)
+        {
+            if (!Connected) return "Pico UART: disconnected";
+            if (picoHistory.Count == 0) return $"Pico UART: awaiting ACK (or return wire/firmware); timeouts {Volatile.Read(ref picoTimeouts)}";
+            return $"NodeMCU ↔ Pico UART probe avg/P95/max: {TimingSummary(picoHistory)} | timeouts {Volatile.Read(ref picoTimeouts)}";
+        }
+    }
+    public double[] RttHistory() { lock (timingLock) return rttHistory.ToArray(); }
+    bool adaptiveMouse;
+    int manualMouseInterval = 16;
+    long lastAdaptiveAdjustment;
+    public bool AdaptiveMouse => Volatile.Read(ref adaptiveMouse);
+    public int ManualMouseInterval => Volatile.Read(ref manualMouseInterval);
+    public void SetAdaptiveMouse(bool enabled)
+    {
+        Volatile.Write(ref adaptiveMouse, enabled);
+        Volatile.Write(ref mouseIntervalMs, Volatile.Read(ref manualMouseInterval));
+        Interlocked.Exchange(ref lastAdaptiveAdjustment, Environment.TickCount64);
+    }
+    void UpdateAdaptiveMouse()
+    {
+        if (!AdaptiveMouse || !Connected || BenchmarkRunning) return;
+        long now = Environment.TickCount64;
+        if (now - Interlocked.Read(ref lastAdaptiveAdjustment) < 8000) return;
+        int target = ManualMouseInterval;
+        // Conservative: only back off from the chosen target when movement backlog
+        // persists. Never choose a rate faster than the user selected.
+        int backlog;
+        lock (motionLock) backlog = Math.Max(Math.Abs(pendingX), Math.Abs(pendingY));
+        int current = MouseUpdateMs;
+        // Large backlog calls for maintaining responsiveness, not slowing the sender.
+        // Back off only when scheduler lateness has remained elevated, then recover slowly.
+        double p95Lateness;
+        lock (timingLock)
+        {
+            var values = schedulerLateness.OrderBy(v => v).ToArray();
+            p95Lateness = values.Length >= 32 ? values[(int)Math.Ceiling(values.Length * .95) - 1] : 0;
+        }
+        int next = backlog < 32 && p95Lateness >= 12 ? Math.Min(33, current + 2) :
+            backlog >= 32 || p95Lateness <= 4 ? Math.Max(target, current - 1) : current;
+        if (next != current) Volatile.Write(ref mouseIntervalMs, next);
+        Interlocked.Exchange(ref lastAdaptiveAdjustment, now);
+    }
     const int TimingWindow = 256;
     static void AddTiming(Queue<double> samples, double value)
     {
@@ -337,6 +443,7 @@ sealed class Transport : IDisposable
         lock (motionLock)
         {
             mouseSensitivity = Math.Clamp(sensitivity, 0.25, 3.0);
+            Volatile.Write(ref manualMouseInterval, Math.Clamp(intervalMs, 8, 33));
             Volatile.Write(ref mouseIntervalMs, Math.Clamp(intervalMs, 8, 33));
             fractionalX = fractionalY = 0;
         }
@@ -497,7 +604,18 @@ sealed class Transport : IDisposable
                     {
                         var response = await reader.ReadLineAsync(cts.Token);
                         if (response == null) throw new IOException("Connection closed");
-                        if (response.StartsWith("STAT,"))
+                        if (response.StartsWith("PICO,"))
+                        {
+                            var parts = response.Split(',');
+                            if (parts.Length == 3 && int.TryParse(parts[1], out int ackId) &&
+                                long.TryParse(parts[2], out long microseconds) &&
+                                ackId == Volatile.Read(ref picoProbeId) && microseconds >= 0 && microseconds <= 500000)
+                            {
+                                Interlocked.Exchange(ref picoLastAckTick, Environment.TickCount64);
+                                lock (timingLock) AddTiming(picoHistory, microseconds / 1000.0);
+                            }
+                        }
+                        else if (response.StartsWith("STAT,"))
                         {
                             var fields = response.Split(',');
                             if (fields.Length == 5 && int.TryParse(fields[1], out int rssi) &&
@@ -517,6 +635,7 @@ sealed class Transport : IDisposable
                             {
                                 var ms = (System.Diagnostics.Stopwatch.GetTimestamp() - t) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
                                 Interlocked.Exchange(ref latencyTenths, (long)Math.Round(ms * 10));
+                                lock (timingLock) AddTiming(rttHistory, ms);
                                 if (BenchmarkRunning) lock (benchmarkLock) benchmarkSamples.Add(ms);
                             }
                         }
@@ -524,9 +643,12 @@ sealed class Transport : IDisposable
                 }, cts.Token);
                 var lastPing = DateTimeOffset.MinValue;
                 lastMouseFlush = Environment.TickCount64;
-                lock (timingLock) { schedulerIntervals.Clear(); schedulerLateness.Clear(); activeReportIntervals.Clear(); }
+                lock (timingLock) { schedulerIntervals.Clear(); schedulerLateness.Clear(); activeReportIntervals.Clear(); rttHistory.Clear(); }
                 long lastKeyboardKeepalive = Environment.TickCount64;
                 long lastTelemetryRequest = Environment.TickCount64;
+                long lastPicoProbe = Environment.TickCount64;
+                Interlocked.Exchange(ref picoLastAckTick, lastPicoProbe);
+                lock (timingLock) picoHistory.Clear();
                 while (!cts.IsCancellationRequested)
                 {
                     if (readReplies.IsFaulted || readReplies.IsCompleted) throw new IOException("Ping response reader stopped");
@@ -566,16 +688,27 @@ sealed class Transport : IDisposable
                         await writer.WriteLineAsync("STAT");
                         lastTelemetryRequest = Environment.TickCount64;
                     }
+                    if (Environment.TickCount64 - lastPicoProbe >= 3000)
+                    {
+                        // Single outstanding probe: avoid overloading UART if the return wire is absent.
+                        if (Interlocked.Read(ref picoLastAckTick) < lastPicoProbe)
+                            Interlocked.Increment(ref picoTimeouts);
+                        int id = (Volatile.Read(ref picoProbeId) + 1) & 65535;
+                        Volatile.Write(ref picoProbeId, id);
+                        await writer.WriteLineAsync($"PICO?,{id}");
+                        lastPicoProbe = Environment.TickCount64;
+                    }
+                    UpdateAdaptiveMouse();
                     // Avoid blocking the transport thread in 5ms queue waits.
                     // Short async delays produce steadier scheduling at 60 Hz.
                     await Task.Delay(1, cts.Token);
                 }
             }
             catch (OperationCanceledException) { break; }
-            catch { /* retry after delay */ }
+            catch (Exception ex) { DiagnosticLog.Write("Transport retry: " + ex.GetType().Name + ": " + ex.Message); }
             finally
             {
-                if (connected) { connected = false; connectedSince = null; Interlocked.Increment(ref reconnects); disconnected(); }
+                if (connected) { connected = false; connectedSince = null; Interlocked.Increment(ref reconnects); DiagnosticLog.Write("Transport connection ended."); disconnected(); }
                 ClearMouseMotion();
                 Interlocked.Exchange(ref mouseLastSentTick, 0);
                 Volatile.Write(ref espRssi, int.MinValue);
