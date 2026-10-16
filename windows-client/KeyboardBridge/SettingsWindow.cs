@@ -3,7 +3,7 @@ using System.Windows.Forms;
 
 namespace KeyboardBridge;
 
-record UserPreferences(int ToggleKey, int MouseToggleKey = 0x7A, bool Linked = false, double MouseSensitivity = 1.0, int MouseUpdateMs = 16)
+record UserPreferences(int ToggleKey, int MouseToggleKey = 0x7A, bool Linked = false, double MouseSensitivity = 1.0, int MouseUpdateMs = 16, bool AdaptiveMouse = false)
 {
     public static UserPreferences Load(string path)
     {
@@ -50,6 +50,8 @@ sealed class SettingsWindow : Form
     readonly ComboBox updateRate = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 140 };
     Action<double,int>? saveMouseTuning;
     readonly CheckBox launchAtLogin = new() { Text = "Start with Windows", AutoSize = true };
+    readonly CheckBox adaptive = new() { Text = "Experimental adaptive mouse pacing", AutoSize = true };
+    readonly RttGraph rttGraph = new() { Dock = DockStyle.Fill, Height = 110 };
     readonly CheckBox linked = new() { Text = "Switch keyboard + mouse together", AutoSize = true };
     Func<bool>? isMouseRemote;
     Func<int>? getMouseHotkey;
@@ -164,7 +166,7 @@ sealed class SettingsWindow : Form
         diagnostics.SetColumnSpan(schedulerDiag, 2);
         diagnostics.Controls.Add(espDiag, 0, 4);
         diagnostics.SetColumnSpan(espDiag, 2);
-        diagnostics.Controls.Add(note, 0, 6);
+        diagnostics.Controls.Add(note, 0, 10);
         launchAtLogin.Checked = StartupSettings.Enabled;
         launchAtLogin.CheckedChanged += (_, _) =>
         {
@@ -193,7 +195,10 @@ sealed class SettingsWindow : Form
             }
             catch (Exception ex) { MessageBox.Show(this, ex.Message, "Export failed"); }
         };
-        diagnostics.Controls.Add(export, 1, 5);
+        diagnostics.Controls.Add(export, 1, 9);
+        diagnostics.Controls.Add(rttGraph, 0, 6);
+        diagnostics.SetColumnSpan(rttGraph, 2);
+        diagnostics.RowStyles[6].Height = 120;
         updateRate.Items.AddRange(new object[] { "30 Hz (33 ms)", "60 Hz (16 ms)", "90 Hz (11 ms)", "125 Hz (8 ms)" });
         AddRow(performance, 0, "Mouse sensitivity %", sensitivity);
         AddRow(performance, 1, "Mouse update rate", updateRate);
@@ -205,6 +210,13 @@ sealed class SettingsWindow : Form
                 saveMouseTuning?.Invoke((double)sensitivity.Value / 100.0, intervals[updateRate.SelectedIndex]);
         };
         performance.Controls.Add(saveTuning, 1, 2);
+        performance.Controls.Add(adaptive, 1, 3);
+        var adaptiveHint = new Label { Text = "Default OFF. Never exceeds your chosen speed. Changes apply only after 8-second evaluation windows.", AutoSize = true, MaximumSize = new System.Drawing.Size(330, 0) };
+        performance.Controls.Add(adaptiveHint, 0, 4);
+        performance.SetColumnSpan(adaptiveHint, 2);
+        var effectiveRate = new Label { AutoSize = true };
+        performance.Controls.Add(effectiveRate, 1, 5);
+        timer.Tick += (_, _) => effectiveRate.Text = $"Effective: {network.MouseUpdateMs} ms (manual {network.ManualMouseInterval} ms)";
         diagnostics.SetColumnSpan(note, 2);
         timer.Tick += (_, _) => RefreshStatus();
         timer.Start();
@@ -220,6 +232,12 @@ sealed class SettingsWindow : Form
         for (int n = 1; n <= 12; n++) mouseHotkey.Items.Add("Ctrl + Alt + F" + n);
         mouseHotkey.SelectedIndex = Math.Clamp(mouseKey() - 0x70, 0, 11);
         linked.Checked = linkedMode();
+    }
+
+    public void SetAdaptiveMouse(bool enabled, Action<bool> apply)
+    {
+        adaptive.Checked = enabled;
+        adaptive.CheckedChanged += (_, _) => apply(adaptive.Checked);
     }
 
     public void SetMouseTuning(Func<double> currentSensitivity, Func<int> currentInterval, Action<double,int> apply)
@@ -266,6 +284,7 @@ sealed class SettingsWindow : Form
         mouseDiag.Text = network.MouseDiagnostics();
         schedulerDiag.Text = network.SchedulerDiagnostics();
         espDiag.Text = network.EspDiagnostics();
+        rttGraph.Samples = network.RttHistory();
     }
 
     protected override void OnFormClosed(FormClosedEventArgs e)
