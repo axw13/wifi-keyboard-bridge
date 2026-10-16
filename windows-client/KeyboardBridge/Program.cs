@@ -308,6 +308,19 @@ sealed class Transport : IDisposable
     readonly Queue<double> schedulerLateness = new();
     readonly Queue<double> activeReportIntervals = new();
     readonly Queue<double> rttHistory = new();
+    readonly Queue<double> picoHistory = new();
+    long picoLastAckTick;
+    int picoProbeId;
+    int picoTimeouts;
+    public string PicoDiagnostics()
+    {
+        lock (timingLock)
+        {
+            if (!Connected) return "Pico UART: disconnected";
+            if (picoHistory.Count == 0) return $"Pico UART: awaiting ACK (or return wire/firmware); timeouts {Volatile.Read(ref picoTimeouts)}";
+            return $"NodeMCU ↔ Pico UART probe avg/P95/max: {TimingSummary(picoHistory)} | timeouts {Volatile.Read(ref picoTimeouts)}";
+        }
+    }
     public double[] RttHistory() { lock (timingLock) return rttHistory.ToArray(); }
     bool adaptiveMouse;
     int manualMouseInterval = 16;
@@ -562,7 +575,18 @@ sealed class Transport : IDisposable
                     {
                         var response = await reader.ReadLineAsync(cts.Token);
                         if (response == null) throw new IOException("Connection closed");
-                        if (response.StartsWith("STAT,"))
+                        if (response.StartsWith("PICO,"))
+                        {
+                            var parts = response.Split(',');
+                            if (parts.Length == 3 && int.TryParse(parts[1], out int ackId) &&
+                                long.TryParse(parts[2], out long microseconds) &&
+                                ackId == Volatile.Read(ref picoProbeId) && microseconds >= 0 && microseconds <= 500000)
+                            {
+                                Interlocked.Exchange(ref picoLastAckTick, Environment.TickCount64);
+                                lock (timingLock) AddTiming(picoHistory, microseconds / 1000.0);
+                            }
+                        }
+                        else if (response.StartsWith("STAT,"))
                         {
                             var fields = response.Split(',');
                             if (fields.Length == 5 && int.TryParse(fields[1], out int rssi) &&
@@ -593,6 +617,9 @@ sealed class Transport : IDisposable
                 lock (timingLock) { schedulerIntervals.Clear(); schedulerLateness.Clear(); activeReportIntervals.Clear(); rttHistory.Clear(); }
                 long lastKeyboardKeepalive = Environment.TickCount64;
                 long lastTelemetryRequest = Environment.TickCount64;
+                long lastPicoProbe = Environment.TickCount64;
+                Interlocked.Exchange(ref picoLastAckTick, lastPicoProbe);
+                lock (timingLock) picoHistory.Clear();
                 while (!cts.IsCancellationRequested)
                 {
                     if (readReplies.IsFaulted || readReplies.IsCompleted) throw new IOException("Ping response reader stopped");
@@ -631,6 +658,16 @@ sealed class Transport : IDisposable
                     {
                         await writer.WriteLineAsync("STAT");
                         lastTelemetryRequest = Environment.TickCount64;
+                    }
+                    if (Environment.TickCount64 - lastPicoProbe >= 3000)
+                    {
+                        // Single outstanding probe: avoid overloading UART if the return wire is absent.
+                        if (Interlocked.Read(ref picoLastAckTick) < lastPicoProbe)
+                            Interlocked.Increment(ref picoTimeouts);
+                        int id = (Volatile.Read(ref picoProbeId) + 1) & 65535;
+                        Volatile.Write(ref picoProbeId, id);
+                        await writer.WriteLineAsync($"PICO?,{id}");
+                        lastPicoProbe = Environment.TickCount64;
                     }
                     UpdateAdaptiveMouse();
                     // Avoid blocking the transport thread in 5ms queue waits.
