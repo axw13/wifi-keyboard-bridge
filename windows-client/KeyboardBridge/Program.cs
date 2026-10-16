@@ -286,11 +286,12 @@ sealed class Transport : IDisposable
             mouseButtons = buttons;
             // Button presses/releases and wheel remain immediate and reliable.
             if (wheel != 0) pendingWheel = Math.Clamp(pendingWheel + wheel, -127, 127);
-            return queue.TryAdd($"M,{buttons},0,0,{Math.Clamp(pendingWheel,-127,127)}") &&
-                ClearPendingWheel();
+            var packet = $"M,{buttons},0,0,{Math.Clamp(pendingWheel,-127,127)}";
+            if (!queue.TryAdd(packet)) return false;
+            pendingWheel = 0;
+            return true;
         }
     }
-    bool ClearPendingWheel() { pendingWheel = 0; return true; }
     void FlushMouseMovement(StreamWriter writer)
     {
         // Called on transport worker; at most two frames per 16 ms.
@@ -353,6 +354,7 @@ sealed class Transport : IDisposable
                 }, cts.Token);
                 var lastPing = DateTimeOffset.MinValue;
                 lastMouseFlush = Environment.TickCount64;
+                long lastKeyboardKeepalive = Environment.TickCount64;
                 while (!cts.IsCancellationRequested)
                 {
                     if (readReplies.IsFaulted || readReplies.IsCompleted) throw new IOException("Ping response reader stopped");
@@ -367,8 +369,11 @@ sealed class Transport : IDisposable
                         FlushMouseMovement(writer);
                         lastMouseFlush = Environment.TickCount64;
                     }
-                    if (Environment.TickCount64 % 250 < 5)
+                    if (Environment.TickCount64 - lastKeyboardKeepalive >= 250)
+                    {
                         await writer.WriteLineAsync(Volatile.Read(ref last)); // Key-hold keepalive
+                        lastKeyboardKeepalive = Environment.TickCount64;
+                    }
                     if (DateTimeOffset.UtcNow - lastPing > TimeSpan.FromSeconds(2))
                     {
                         lastPing = DateTimeOffset.UtcNow;
