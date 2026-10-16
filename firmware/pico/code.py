@@ -1,0 +1,39 @@
+"""Pico CircuitPython HID keyboard receiver. UART GP1 RX at 9600 baud."""
+import board
+import busio
+import time
+import usb_hid
+
+keyboard = next((d for d in usb_hid.devices if d.usage_page == 1 and d.usage == 6), None)
+if keyboard is None:
+    raise RuntimeError("USB HID keyboard device not enabled")
+uart = busio.UART(tx=board.GP0, rx=board.GP1, baudrate=9600, timeout=0)
+line = bytearray()
+last_frame = time.monotonic()
+released = bytes(8)
+keyboard.send_report(released)
+
+while True:
+    incoming = uart.read(64)
+    if incoming:
+        for b in incoming:
+            if b == 10:
+                try:
+                    parts = bytes(line).decode("ascii").strip().split(",")
+                    if len(parts) == 8 and parts[0] == "S":
+                        nums = [int(p) for p in parts[1:]]
+                        if all(0 <= n <= 255 for n in nums):
+                            keyboard.send_report(bytes([nums[0], 0] + nums[1:]))
+                            last_frame = time.monotonic()
+                except (ValueError, UnicodeError):
+                    pass
+                line = bytearray()  # CircuitPython does not support bytearray item deletion
+            elif b != 13:
+                if len(line) < 80:
+                    line.append(b)
+                else:
+                    line = bytearray()
+    if time.monotonic() - last_frame > 2:
+        keyboard.send_report(released)
+        last_frame = time.monotonic()
+    time.sleep(0.002)
