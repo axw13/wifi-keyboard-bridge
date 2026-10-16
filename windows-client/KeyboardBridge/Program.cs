@@ -35,15 +35,20 @@ sealed class BridgeContext : ApplicationContext
     readonly HashSet<int> localDown = new();
     bool remote;
     bool hotkeyLatch;
+    int toggleVk;
+    SettingsWindow? settingsWindow;
+    readonly string prefPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WifiKeyboardBridge", "preferences.json");
     readonly SynchronizationContext ui;
 
     public BridgeContext(Settings cfg)
     {
         ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         network = new Transport(cfg, () => ui.Post(_ => SwitchLocal(), null));
+        toggleVk = UserPreferences.Load(prefPath).ToggleKey;
         tray = new NotifyIcon { Icon = System.Drawing.SystemIcons.Application, Visible = true, Text = "Keyboard Bridge: LOCAL" };
         var menu = new ContextMenuStrip();
-        menu.Items.Add("Switch Local / Remote (Ctrl+Alt+F12)", null, (_, _) => Toggle());
+        menu.Items.Add("Switch Local / Remote", null, (_, _) => Toggle());
+        menu.Items.Add("Settings && Connection Statistics...", null, (_, _) => ShowSettings(cfg));
         menu.Items.Add("Exit", null, (_, _) => ExitThread());
         tray.ContextMenuStrip = menu;
         tray.DoubleClick += (_, _) => Toggle();
@@ -56,13 +61,13 @@ sealed class BridgeContext : ApplicationContext
         if (pressed) physical.Add(vk); else physical.Remove(vk);
         bool ctrl = physical.Contains(0xA2) || physical.Contains(0xA3) || physical.Contains(0x11);
         bool alt = physical.Contains(0xA4) || physical.Contains(0xA5) || physical.Contains(0x12);
-        if (vk == 0x7B && pressed && ctrl && alt)
+        if (vk == toggleVk && pressed && ctrl && alt)
         {
             if (!hotkeyLatch) { hotkeyLatch = true; Toggle(); }
             swallowed.Add(vk);
             return true;
         }
-        if (vk == 0x7B && !pressed) hotkeyLatch = false;
+        if (vk == toggleVk && !pressed) hotkeyLatch = false;
         // Preserve key-up ownership across LOCAL -> REMOTE transitions.
         // In particular, Ctrl and Alt were pressed locally before the toggle hotkey fired.
         if (!pressed && localDown.Remove(vk)) return false;
@@ -113,9 +118,21 @@ sealed class BridgeContext : ApplicationContext
         network.Send(0, Array.Empty<int>());
         tray.Text = "Keyboard Bridge: LOCAL";
     }
+    void ShowSettings(Settings cfg)
+    {
+        if (settingsWindow != null && !settingsWindow.IsDisposed) { settingsWindow.Activate(); return; }
+        settingsWindow = new SettingsWindow(cfg, network, () => remote, () => toggleVk, vk =>
+        {
+            toggleVk = vk;
+            hotkeyLatch = false;
+            UserPreferences.Save(prefPath, new UserPreferences(vk));
+        });
+        settingsWindow.Show();
+    }
     protected override void ExitThreadCore()
     {
         SwitchLocal();
+        settingsWindow?.Close();
         hook.Dispose();
         network.Dispose();
         tray.Visible = false;
@@ -186,6 +203,12 @@ sealed class Transport : IDisposable
     readonly BlockingCollection<string> queue = new(256);
     readonly CancellationTokenSource cts = new();
     volatile bool connected;
+    long sentReports;
+    long reconnects;
+    DateTimeOffset? connectedSince;
+    public long SentReports => Interlocked.Read(ref sentReports);
+    public long Reconnects => Interlocked.Read(ref reconnects);
+    public DateTimeOffset? ConnectedSince => connectedSince;
     string last = "S,0,0,0,0,0,0,0";
     public bool Connected => connected;
     public Transport(Settings cfg, Action disconnected)
@@ -217,9 +240,14 @@ sealed class Transport : IDisposable
                 if (await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(3), cts.Token) != "OK")
                     throw new IOException("Authentication failed");
                 connected = true;
+                connectedSince = DateTimeOffset.UtcNow;
                 while (!cts.IsCancellationRequested)
                 {
-                    if (queue.TryTake(out var frame, 250)) await writer.WriteLineAsync(frame);
+                    if (queue.TryTake(out var frame, 250))
+                    {
+                        await writer.WriteLineAsync(frame);
+                        Interlocked.Increment(ref sentReports);
+                    }
                     else await writer.WriteLineAsync(Volatile.Read(ref last)); // Key-hold keepalive
                 }
             }
@@ -227,7 +255,7 @@ sealed class Transport : IDisposable
             catch { /* retry after delay */ }
             finally
             {
-                if (connected) { connected = false; disconnected(); }
+                if (connected) { connected = false; connectedSince = null; Interlocked.Increment(ref reconnects); disconnected(); }
                 Volatile.Write(ref last, "S,0,0,0,0,0,0,0");
                 while (queue.TryTake(out _)) { }
             }
