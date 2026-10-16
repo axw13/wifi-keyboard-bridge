@@ -7,6 +7,7 @@ This is an incremental release. **Do not replace a working main-branch installat
 - Optional autostart through the current user's Windows Run registry key. Enable only from a published executable, not `dotnet run`.
 - GitHub Actions Windows Release build + self-contained win-x64 publish artifact (not code-signed).
 - Save diagnostics to a user-chosen text report for comparison.
+- **Tabbed settings**: Connection, Input, Performance, Diagnostics.
 - Existing 90 Hz mouse forwarding and NodeMCU/Pico firmware remain unchanged.
 
 ## Additional milestones to implement and test before merge
