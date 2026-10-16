@@ -287,6 +287,36 @@ sealed class Transport : IDisposable
     long reconnects;
     long latencyTenths = -1;
     long pingSentTimestamp;
+    readonly object benchmarkLock = new();
+    readonly List<double> benchmarkSamples = new();
+    long benchmarkEndTick;
+    int benchmarkAttempts;
+    int benchmarkTimeouts;
+    public bool BenchmarkRunning => Environment.TickCount64 < Interlocked.Read(ref benchmarkEndTick);
+    public void StartBenchmark()
+    {
+        if (!Connected) throw new InvalidOperationException("NodeMCU is disconnected.");
+        lock (benchmarkLock)
+        {
+            benchmarkSamples.Clear();
+            benchmarkAttempts = 0;
+            benchmarkTimeouts = 0;
+            Interlocked.Exchange(ref benchmarkEndTick, Environment.TickCount64 + 10000);
+        }
+    }
+    public string BenchmarkStatus()
+    {
+        lock (benchmarkLock)
+        {
+            if (benchmarkSamples.Count == 0)
+                return BenchmarkRunning ? "Collecting samples..." : "No samples. Run benchmark while connected.";
+            var sorted = benchmarkSamples.OrderBy(x => x).ToArray();
+            var avg = sorted.Average();
+            var median = sorted[sorted.Length / 2];
+            var p95 = sorted[(int)Math.Ceiling(sorted.Length * .95) - 1];
+            return $"{(BenchmarkRunning ? "Running" : "Finished")}: {sorted.Length} samples, avg {avg:F1} ms, median {median:F1} ms, p95 {p95:F1} ms, max {sorted[^1]:F1} ms; unanswered: {benchmarkTimeouts}";
+        }
+    }
     public double? RoundTripMs => Interlocked.Read(ref latencyTenths) is var value && value >= 0 ? value / 10.0 : null;
     DateTimeOffset? connectedSince;
     public long SentReports => Interlocked.Read(ref sentReports);
@@ -397,8 +427,11 @@ sealed class Transport : IDisposable
                         {
                             var t = Interlocked.Exchange(ref pingSentTimestamp, 0);
                             if (t != 0)
-                                Interlocked.Exchange(ref latencyTenths,
-                                    (long)Math.Round((System.Diagnostics.Stopwatch.GetTimestamp() - t) * 10000.0 / System.Diagnostics.Stopwatch.Frequency));
+                            {
+                                var ms = (System.Diagnostics.Stopwatch.GetTimestamp() - t) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                                Interlocked.Exchange(ref latencyTenths, (long)Math.Round(ms * 10));
+                                if (BenchmarkRunning) lock (benchmarkLock) benchmarkSamples.Add(ms);
+                            }
                         }
                     }
                 }, cts.Token);
@@ -424,11 +457,15 @@ sealed class Transport : IDisposable
                         await writer.WriteLineAsync(Volatile.Read(ref last)); // Key-hold keepalive
                         lastKeyboardKeepalive = Environment.TickCount64;
                     }
-                    if (DateTimeOffset.UtcNow - lastPing > TimeSpan.FromSeconds(2))
+                    if (DateTimeOffset.UtcNow - lastPing > (BenchmarkRunning ? TimeSpan.FromMilliseconds(150) : TimeSpan.FromSeconds(2)))
                     {
                         lastPing = DateTimeOffset.UtcNow;
                         if (Interlocked.Read(ref pingSentTimestamp) != 0)
+                        {
                             Interlocked.Exchange(ref latencyTenths, -1); // timed-out / unsupported firmware
+                            if (BenchmarkRunning) lock (benchmarkLock) benchmarkTimeouts++;
+                        }
+                        if (BenchmarkRunning) lock (benchmarkLock) benchmarkAttempts++;
                         Interlocked.Exchange(ref pingSentTimestamp, System.Diagnostics.Stopwatch.GetTimestamp());
                         await writer.WriteLineAsync("PING");
                     }
