@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
+    <ApplicationIcon>obj\bridge.ico</ApplicationIcon>
     <Version>0.9.0</Version>
     <AssemblyVersion>0.9.0.0</AssemblyVersion>
     <FileVersion>0.9.0.0</FileVersion>
@@ -11,6 +12,9 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
+  <Target Name="GenerateBridgeIcon" BeforeTargets="PrepareForBuild" Condition="'$(OS)' == 'Windows_NT'">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\..\..\tools\Generate-Icon.ps1&quot;" />
+  </Target>
   <ItemGroup>
     <None Update="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
