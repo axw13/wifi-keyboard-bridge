@@ -4,7 +4,7 @@ using System.Windows.Forms;
 
 namespace KeyboardBridge;
 
-record UserPreferences(int ToggleKey, int MouseToggleKey = 0x7A, bool Linked = false, double MouseSensitivity = 1.0, int MouseUpdateMs = 16, bool AdaptiveMouse = false)
+record UserPreferences(int ToggleKey, int MouseToggleKey = 0x7A, bool Linked = false, double MouseSensitivity = 1.0, int MouseUpdateMs = 16, bool AdaptiveMouse = false, bool AntiIdle = false)
 {
     public static UserPreferences Load(string path)
     {
@@ -52,6 +52,7 @@ sealed class SettingsWindow : Form
     readonly ComboBox updateRate = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 140 };
     Action<double,int>? saveMouseTuning;
     readonly CheckBox launchAtLogin = new() { Text = "Start with Windows", AutoSize = true };
+    readonly CheckBox antiIdle = new() { Text = "Enable remote PC anti-idle (both inputs LOCAL)", AutoSize = true };
     readonly CheckBox adaptive = new() { Text = "Experimental adaptive mouse pacing", AutoSize = true };
     readonly RttGraph rttGraph = new() { Dock = DockStyle.Fill, Height = 110 };
     readonly CheckBox linked = new() { Text = "Switch keyboard + mouse together", AutoSize = true };
@@ -217,6 +218,11 @@ sealed class SettingsWindow : Form
         };
         performance.Controls.Add(saveTuning, 1, 2);
         performance.Controls.Add(adaptive, 1, 3);
+        input.Controls.Add(antiIdle, 1, 6);
+        var antiIdleHint = new Label { Text = "After 60 seconds of local inactivity, moves the REMOTE PC cursor by 1 pixel every 30 seconds. Never moves the local cursor. Stops if keyboard or mouse is REMOTE or the bridge disconnects. Default OFF.", AutoSize = true, MaximumSize = new System.Drawing.Size(340, 0) };
+        input.Controls.Add(antiIdleHint, 0, 7);
+        input.SetColumnSpan(antiIdleHint, 2);
+        input.RowStyles[7].Height = 70;
         var adaptiveHint = new Label { Text = "Default OFF. Never exceeds your chosen speed. Changes apply only after 8-second evaluation windows.", AutoSize = true, MaximumSize = new System.Drawing.Size(330, 0) };
         performance.Controls.Add(adaptiveHint, 0, 4);
         performance.SetColumnSpan(adaptiveHint, 2);
@@ -238,6 +244,12 @@ sealed class SettingsWindow : Form
         for (int n = 1; n <= 12; n++) mouseHotkey.Items.Add("Ctrl + Alt + F" + n);
         mouseHotkey.SelectedIndex = Math.Clamp(mouseKey() - 0x70, 0, 11);
         linked.Checked = linkedMode();
+    }
+
+    public void SetAntiIdle(bool enabled, Action<bool> apply)
+    {
+        antiIdle.Checked = enabled;
+        antiIdle.CheckedChanged += (_, _) => apply(antiIdle.Checked);
     }
 
     public void SetAdaptiveMouse(bool enabled, Action<bool> apply)
