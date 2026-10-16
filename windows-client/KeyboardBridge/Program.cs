@@ -409,8 +409,9 @@ sealed class Transport : IDisposable
             Interlocked.Increment(ref mouseReports);
             long now = Environment.TickCount64;
             long previous = Interlocked.Exchange(ref mouseLastSentTick, now);
-            if (previous != 0)
+            if (previous != 0 && now - previous <= 100)
             {
+                // Gaps above 100 ms are idle pauses, not movement pacing jitter.
                 long interval = now - previous;
                 Interlocked.Increment(ref mouseIntervalCount);
                 Interlocked.Add(ref mouseIntervalTotal, interval);
