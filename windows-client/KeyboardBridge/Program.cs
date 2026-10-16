@@ -43,6 +43,7 @@ sealed class BridgeContext : ApplicationContext
     bool hotkeyLatch;
     int toggleVk;
     SettingsWindow? settingsWindow;
+    double mouseSensitivity = 1.0;
     readonly string prefPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WifiKeyboardBridge", "preferences.json");
     readonly SynchronizationContext ui;
 
@@ -54,6 +55,8 @@ sealed class BridgeContext : ApplicationContext
         toggleVk = preferences.ToggleKey;
         mouseToggleVk = preferences.MouseToggleKey;
         linkedToggle = preferences.Linked;
+        mouseSensitivity = Math.Clamp(preferences.MouseSensitivity, 0.25, 3.0);
+        network.SetMouseTuning(mouseSensitivity, preferences.MouseUpdateMs);
         tray = new NotifyIcon { Icon = System.Drawing.SystemIcons.Application, Visible = true, Text = "Keyboard Bridge: LOCAL" };
         var menu = new ContextMenuStrip();
         menu.Items.Add("Switch keyboard", null, (_, _) => Toggle());
@@ -159,7 +162,7 @@ sealed class BridgeContext : ApplicationContext
         {
             toggleVk = vk;
             hotkeyLatch = false;
-            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle));
+            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.MouseUpdateMs));
         }, newSettings =>
         {
             SwitchLocal();
@@ -174,6 +177,12 @@ sealed class BridgeContext : ApplicationContext
             linkedToggle = linked;
             mouseHotkeyLatch = false;
             UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle));
+        });
+        settingsWindow.SetMouseTuning(() => mouseSensitivity, () => network.MouseUpdateMs, (sensitivity, interval) =>
+        {
+            mouseSensitivity = sensitivity;
+            network.SetMouseTuning(sensitivity, interval);
+            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, sensitivity, interval));
         });
         settingsWindow.Show();
     }
@@ -258,7 +267,19 @@ sealed class Transport : IDisposable
     readonly object motionLock = new();
     int pendingX, pendingY, pendingWheel, mouseButtons;
     long lastMouseFlush;
-    const int MouseIntervalMs = 16;
+    int mouseIntervalMs = 16;
+    double mouseSensitivity = 1.0;
+    double fractionalX, fractionalY;
+    public int MouseUpdateMs => Volatile.Read(ref mouseIntervalMs);
+    public void SetMouseTuning(double sensitivity, int intervalMs)
+    {
+        lock (motionLock)
+        {
+            mouseSensitivity = Math.Clamp(sensitivity, 0.25, 3.0);
+            Volatile.Write(ref mouseIntervalMs, Math.Clamp(intervalMs, 8, 33));
+            fractionalX = fractionalY = 0;
+        }
+    }
     long reconnects;
     long latencyTenths = -1;
     long pingSentTimestamp;
@@ -280,8 +301,14 @@ sealed class Transport : IDisposable
         if (!Connected) return false;
         lock (motionLock)
         {
-            pendingX = Math.Clamp(pendingX + dx, -254, 254);
-            pendingY = Math.Clamp(pendingY + dy, -254, 254);
+            // Preserve fractional movement at low sensitivity rather than truncating each event.
+            double sx = dx * mouseSensitivity + fractionalX;
+            double sy = dy * mouseSensitivity + fractionalY;
+            int ix = (int)Math.Truncate(sx), iy = (int)Math.Truncate(sy);
+            fractionalX = sx - ix;
+            fractionalY = sy - iy;
+            pendingX = Math.Clamp(pendingX + ix, -1024, 1024);
+            pendingY = Math.Clamp(pendingY + iy, -1024, 1024);
         }
         return true;
     }
@@ -378,7 +405,7 @@ sealed class Transport : IDisposable
                         Interlocked.Increment(ref sentReports);
                     }
                     // Avoid flooding the UART with keyboard keepalives while processing mouse movement.
-                    if (Environment.TickCount64 - lastMouseFlush >= MouseIntervalMs)
+                    if (Environment.TickCount64 - lastMouseFlush >= MouseUpdateMs)
                     {
                         FlushMouseMovement(writer);
                         lastMouseFlush = Environment.TickCount64;
