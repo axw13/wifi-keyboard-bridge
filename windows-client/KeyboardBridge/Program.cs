@@ -176,7 +176,7 @@ sealed class BridgeContext : ApplicationContext
             mouseToggleVk = key;
             linkedToggle = linked;
             mouseHotkeyLatch = false;
-            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle));
+            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.MouseUpdateMs));
         });
         settingsWindow.SetMouseTuning(() => mouseSensitivity, () => network.MouseUpdateMs, (sensitivity, interval) =>
         {
