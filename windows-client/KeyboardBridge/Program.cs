@@ -271,6 +271,29 @@ sealed class Transport : IDisposable
     readonly object motionLock = new();
     int pendingX, pendingY, pendingWheel, mouseButtons;
     long lastMouseFlush;
+    long mouseReports;
+    long mouseIntervalCount;
+    long mouseIntervalTotal;
+    long mouseIntervalMax;
+    long mouseLastSentTick;
+    int espRssi = int.MinValue;
+    long espHeap = -1, espFrames = -1, espBytes = -1;
+    public string MouseDiagnostics()
+    {
+        long n = Interlocked.Read(ref mouseIntervalCount);
+        double avg = n > 0 ? Interlocked.Read(ref mouseIntervalTotal) / (double)n : 0;
+        long max = Interlocked.Read(ref mouseIntervalMax);
+        int x, y;
+        lock (motionLock) { x = pendingX; y = pendingY; }
+        return $"Mouse: {Interlocked.Read(ref mouseReports)} sent | interval avg {(n > 0 ? avg.ToString("F1") : "—")} ms, max {(n > 0 ? max.ToString() : "—")} ms | pending X:{x} Y:{y}";
+    }
+    public string EspDiagnostics()
+    {
+        int rssi = Volatile.Read(ref espRssi);
+        if (!Connected) return "NodeMCU: disconnected";
+        if (rssi == int.MinValue) return "NodeMCU: telemetry unavailable (update firmware)";
+        return $"NodeMCU: RSSI {rssi} dBm | free heap {Interlocked.Read(ref espHeap) / 1024.0:F1} KiB | UART frames {Interlocked.Read(ref espFrames)} | bytes {Interlocked.Read(ref espBytes)}";
+    }
     int mouseIntervalMs = 16;
     double mouseSensitivity = 1.0;
     double fractionalX, fractionalY;
@@ -381,7 +404,21 @@ sealed class Transport : IDisposable
             pendingY -= dy;
         }
         if (dx != 0 || dy != 0)
+        {
             await writer.WriteLineAsync($"M,{buttons},{dx},{dy},0");
+            Interlocked.Increment(ref mouseReports);
+            long now = Environment.TickCount64;
+            long previous = Interlocked.Exchange(ref mouseLastSentTick, now);
+            if (previous != 0)
+            {
+                long interval = now - previous;
+                Interlocked.Increment(ref mouseIntervalCount);
+                Interlocked.Add(ref mouseIntervalTotal, interval);
+                long seen;
+                while (interval > (seen = Interlocked.Read(ref mouseIntervalMax)) &&
+                    Interlocked.CompareExchange(ref mouseIntervalMax, interval, seen) != seen) { }
+            }
+        }
     }
     public void DiscardPendingMouseMovement()
     {
@@ -415,6 +452,7 @@ sealed class Transport : IDisposable
                 if (await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(3), cts.Token) != "OK")
                     throw new IOException("Authentication failed");
                 connected = true;
+                Volatile.Write(ref espRssi, int.MinValue);
                 connectedSince = DateTimeOffset.UtcNow;
                 Interlocked.Exchange(ref latencyTenths, -1);
                 var readReplies = Task.Run(async () =>
@@ -423,7 +461,20 @@ sealed class Transport : IDisposable
                     {
                         var response = await reader.ReadLineAsync(cts.Token);
                         if (response == null) throw new IOException("Connection closed");
-                        if (response == "PONG")
+                        if (response.StartsWith("STAT,"))
+                        {
+                            var fields = response.Split(',');
+                            if (fields.Length == 5 && int.TryParse(fields[1], out int rssi) &&
+                                long.TryParse(fields[2], out long heap) &&
+                                long.TryParse(fields[3], out long frames) && long.TryParse(fields[4], out long bytes))
+                            {
+                                Volatile.Write(ref espRssi, rssi);
+                                Interlocked.Exchange(ref espHeap, heap);
+                                Interlocked.Exchange(ref espFrames, frames);
+                                Interlocked.Exchange(ref espBytes, bytes);
+                            }
+                        }
+                        else if (response == "PONG")
                         {
                             var t = Interlocked.Exchange(ref pingSentTimestamp, 0);
                             if (t != 0)
@@ -438,6 +489,7 @@ sealed class Transport : IDisposable
                 var lastPing = DateTimeOffset.MinValue;
                 lastMouseFlush = Environment.TickCount64;
                 long lastKeyboardKeepalive = Environment.TickCount64;
+                long lastTelemetryRequest = Environment.TickCount64;
                 while (!cts.IsCancellationRequested)
                 {
                     if (readReplies.IsFaulted || readReplies.IsCompleted) throw new IOException("Ping response reader stopped");
@@ -469,6 +521,11 @@ sealed class Transport : IDisposable
                         Interlocked.Exchange(ref pingSentTimestamp, System.Diagnostics.Stopwatch.GetTimestamp());
                         await writer.WriteLineAsync("PING");
                     }
+                    if (Environment.TickCount64 - lastTelemetryRequest >= 2000)
+                    {
+                        await writer.WriteLineAsync("STAT");
+                        lastTelemetryRequest = Environment.TickCount64;
+                    }
                     // Avoid blocking the transport thread in 5ms queue waits.
                     // Short async delays produce steadier scheduling at 60 Hz.
                     await Task.Delay(1, cts.Token);
@@ -480,6 +537,8 @@ sealed class Transport : IDisposable
             {
                 if (connected) { connected = false; connectedSince = null; Interlocked.Increment(ref reconnects); disconnected(); }
                 ClearMouseMotion();
+                Interlocked.Exchange(ref mouseLastSentTick, 0);
+                Volatile.Write(ref espRssi, int.MinValue);
                 Interlocked.Exchange(ref latencyTenths, -1);
                 Interlocked.Exchange(ref pingSentTimestamp, 0);
                 Volatile.Write(ref last, "S,0,0,0,0,0,0,0");
