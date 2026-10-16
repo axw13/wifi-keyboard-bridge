@@ -28,6 +28,7 @@ sealed class BridgeContext : ApplicationContext
     readonly NotifyIcon tray;
     readonly KeyboardHook hook;
     readonly MouseHook mouseHook;
+    readonly RawMouseInput rawMouse;
     bool mouseRemote;
     int mouseToggleVk;
     bool linkedToggle;
@@ -63,6 +64,8 @@ sealed class BridgeContext : ApplicationContext
         tray.DoubleClick += (_, _) => Toggle();
         hook = new KeyboardHook(HandleKey);
         mouseHook = new MouseHook(HandleMouse);
+        rawMouse = new RawMouseInput(() => mouseRemote && network.Connected,
+            (dx, dy) => network.SendMouseMovement(dx, dy));
     }
 
     bool HandleKey(int vk, bool pressed, bool injected)
@@ -180,6 +183,7 @@ sealed class BridgeContext : ApplicationContext
         ToggleMouseTo(false);
         settingsWindow?.Close();
         hook.Dispose();
+        rawMouse.Dispose();
         mouseHook.Dispose();
         network.Dispose();
         tray.Visible = false;
@@ -270,6 +274,16 @@ sealed class Transport : IDisposable
         this.cfg = cfg;
         this.disconnected = disconnected;
         _ = Task.Run(Run);
+    }
+    public bool SendMouseMovement(int dx, int dy)
+    {
+        if (!Connected) return false;
+        lock (motionLock)
+        {
+            pendingX = Math.Clamp(pendingX + dx, -254, 254);
+            pendingY = Math.Clamp(pendingY + dy, -254, 254);
+        }
+        return true;
     }
     public bool SendMouse(int buttons, int dx, int dy, int wheel)
     {
