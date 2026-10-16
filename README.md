@@ -1,8 +1,14 @@
 # Wi-Fi Keyboard Bridge
 
-Experimental keyboard sharing: Windows 11 → Wi-Fi → ESP8266 NodeMCU V3 → UART → Raspberry Pi Pico RP2040 → USB HID → second computer. No software is installed on the receiving PC.
+Experimental keyboard and mouse sharing: Windows 11 → Wi-Fi → ESP8266 NodeMCU V3 → UART → Raspberry Pi Pico RP2040 → USB HID → second computer. No software is installed on the receiving PC.
 
 **Status:** The prior fixed-text transport was verified on hardware. This new live-keyboard prototype has **not** yet been compiled or verified end-to-end. Test with Notepad and keep a physical keyboard available.
+
+## Mouse support (experimental)
+
+The Windows tray client supports **independent mouse forwarding** (`Ctrl+Alt+F11` by default) and keyboard forwarding (`Ctrl+Alt+F12` by default). In **Settings & Connection Statistics**, both shortcuts can be changed independently. Turn on **Switch keyboard + mouse together** to toggle both with the keyboard shortcut; the mouse shortcut is inactive in linked mode. Mouse forwarding defaults **off** at launch. Keyboard-only behavior remains unchanged until mouse mode is enabled.
+
+Mouse reports travel as `M,<buttons>,<relativeX>,<relativeY>,<wheel>` and are handled by the Pico default CircuitPython mouse USB HID device. This requires **flashing updated ESP8266 firmware AND copying updated Pico code.py**. The Windows client captures low-level desktop mouse events; high-DPI, raw-input games, cursor acceleration, multi-monitor edges, and relative movement near display borders may not behave like a true KVM. Test movement, click, scroll and switching in Notepad first and retain a physical mouse on the second computer. The remote mouse is released on disconnect or when switching it off.
 
 ## Hardware
 
