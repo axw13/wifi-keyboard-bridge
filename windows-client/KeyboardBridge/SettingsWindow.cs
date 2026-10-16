@@ -38,6 +38,7 @@ sealed class SettingsWindow : Form
     readonly Label reports = new() { AutoSize = true };
     readonly Label reconnects = new() { AutoSize = true };
     readonly Label latency = new() { AutoSize = true };
+    readonly Label benchmarkResult = new() { AutoSize = true, MaximumSize = new System.Drawing.Size(395, 0) };
     readonly TextBox host = new() { Width = 160 };
     readonly NumericUpDown port = new() { Minimum = 1, Maximum = 65535, Width = 100 };
     readonly TextBox token = new() { Width = 160, UseSystemPasswordChar = true };
@@ -61,14 +62,14 @@ sealed class SettingsWindow : Form
         this.setHotkey = setHotkey;
         Text = "Wi-Fi Keyboard Bridge — Settings";
         Width = 475;
-        Height = 660;
-        MinimumSize = new System.Drawing.Size(475, 660);
+        Height = 760;
+        MinimumSize = new System.Drawing.Size(475, 760);
         MaximizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
 
         var panel = new TableLayoutPanel
         {
-            Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 19,
+            Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 22,
             Padding = new Padding(18), AutoSize = false
         };
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 155));
@@ -139,7 +140,16 @@ sealed class SettingsWindow : Form
             saveMousePreferences?.Invoke(0x70 + mouseHotkey.SelectedIndex, linked.Checked);
         };
         panel.Controls.Add(saveMouse, 1, 13);
-        panel.Controls.Add(note, 0, 17);
+        var runBenchmark = new Button { Text = "Benchmark (10 seconds)", AutoSize = true };
+        runBenchmark.Click += (_, _) =>
+        {
+            try { network.StartBenchmark(); benchmarkResult.Text = "Collecting samples..."; }
+            catch (Exception ex) { MessageBox.Show(this, ex.Message, "Benchmark unavailable"); }
+        };
+        panel.Controls.Add(runBenchmark, 1, 17);
+        panel.Controls.Add(benchmarkResult, 0, 18);
+        panel.SetColumnSpan(benchmarkResult, 2);
+        panel.Controls.Add(note, 0, 19);
         updateRate.Items.AddRange(new object[] { "30 Hz (33 ms)", "60 Hz (16 ms)", "90 Hz (11 ms)", "125 Hz (8 ms)" });
         AddRow(panel, 14, "Mouse sensitivity %", sensitivity);
         AddRow(panel, 15, "Mouse update rate", updateRate);
@@ -196,6 +206,7 @@ sealed class SettingsWindow : Form
         reports.Text = network.SentReports.ToString("N0");
         reconnects.Text = network.Reconnects.ToString("N0");
         latency.Text = network.RoundTripMs is double ms ? ms.ToString("F1") + " ms" : "Unavailable";
+        benchmarkResult.Text = network.BenchmarkStatus();
     }
 
     protected override void OnFormClosed(FormClosedEventArgs e)
