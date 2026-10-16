@@ -3,7 +3,7 @@ using System.Windows.Forms;
 
 namespace KeyboardBridge;
 
-record UserPreferences(int ToggleKey)
+record UserPreferences(int ToggleKey, int MouseToggleKey = 0x7A, bool Linked = false)
 {
     public static UserPreferences Load(string path)
     {
@@ -17,7 +17,7 @@ record UserPreferences(int ToggleKey)
             }
         }
         catch (Exception) { /* Corrupt settings should not prevent startup. */ }
-        return new UserPreferences(0x7B); // F12
+        return new UserPreferences(0x7B, 0x7A, false); // keyboard F12, mouse F11
     }
 
     public static void Save(string path, UserPreferences prefs)
@@ -41,6 +41,12 @@ sealed class SettingsWindow : Form
     readonly TextBox host = new() { Width = 160 };
     readonly NumericUpDown port = new() { Minimum = 1, Maximum = 65535, Width = 100 };
     readonly TextBox token = new() { Width = 160, UseSystemPasswordChar = true };
+    readonly ComboBox mouseHotkey = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 125 };
+    readonly CheckBox linked = new() { Text = "Switch keyboard + mouse together", AutoSize = true };
+    Func<bool>? isMouseRemote;
+    Func<int>? getMouseHotkey;
+    Func<bool>? getLinked;
+    Action<int,bool>? saveMousePreferences;
     readonly ComboBox hotkey = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 125 };
     readonly System.Windows.Forms.Timer timer = new() { Interval = 500 };
 
@@ -52,14 +58,14 @@ sealed class SettingsWindow : Form
         this.setHotkey = setHotkey;
         Text = "Wi-Fi Keyboard Bridge — Settings";
         Width = 475;
-        Height = 490;
-        MinimumSize = new System.Drawing.Size(475, 490);
+        Height = 560;
+        MinimumSize = new System.Drawing.Size(475, 560);
         MaximizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
 
         var panel = new TableLayoutPanel
         {
-            Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 13,
+            Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 16,
             Padding = new Padding(18), AutoSize = false
         };
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 155));
@@ -117,11 +123,35 @@ sealed class SettingsWindow : Form
             Text = "RTT is Windows ↔ NodeMCU ping time, not full key-to-screen latency. New firmware required for RTT.",
             AutoSize = true, MaximumSize = new System.Drawing.Size(390, 0)
         };
-        panel.Controls.Add(note, 0, 11);
+        AddRow(panel, 11, "Mouse shortcut", mouseHotkey);
+        panel.Controls.Add(linked, 1, 12);
+        var saveMouse = new Button { Text = "Save mouse options", AutoSize = true };
+        saveMouse.Click += (_, _) =>
+        {
+            if (mouseHotkey.SelectedIndex < 0) return;
+            if (!linked.Checked && mouseHotkey.SelectedIndex == hotkey.SelectedIndex)
+            {
+                MessageBox.Show(this, "Use separate F keys, or enable linked switching."); return;
+            }
+            saveMousePreferences?.Invoke(0x70 + mouseHotkey.SelectedIndex, linked.Checked);
+        };
+        panel.Controls.Add(saveMouse, 1, 13);
+        panel.Controls.Add(note, 0, 14);
         panel.SetColumnSpan(note, 2);
         timer.Tick += (_, _) => RefreshStatus();
         timer.Start();
         RefreshStatus();
+    }
+
+    public void SetMouseSettings(Func<bool> mouseRemote, Func<int> mouseKey, Func<bool> linkedMode, Action<int,bool> save)
+    {
+        isMouseRemote = mouseRemote;
+        getMouseHotkey = mouseKey;
+        getLinked = linkedMode;
+        saveMousePreferences = save;
+        for (int n = 1; n <= 12; n++) mouseHotkey.Items.Add("Ctrl + Alt + F" + n);
+        mouseHotkey.SelectedIndex = Math.Clamp(mouseKey() - 0x70, 0, 11);
+        linked.Checked = linkedMode();
     }
 
     static void AddRow(TableLayoutPanel p, int row, string title, Control control)
@@ -134,7 +164,7 @@ sealed class SettingsWindow : Form
     void RefreshStatus()
     {
         state.Text = (network.Connected ? "Connected" : "Disconnected") +
-            (remote() ? " — REMOTE" : " — LOCAL");
+            " — K:" + (remote() ? "R" : "L") + " M:" + (isMouseRemote?.Invoke() == true ? "R" : "L");
         uptime.Text = network.ConnectedSince is { } since
             ? (DateTimeOffset.UtcNow - since).ToString(@"dd\.hh\:mm\:ss")
             : "—";
