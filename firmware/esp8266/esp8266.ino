@@ -9,6 +9,7 @@ unsigned long lastFrame = 0;
 
 void releaseKeys() {
   Serial.println("S,0,0,0,0,0,0,0");
+  Serial.println("M,0,0,0,0");
   Serial.flush();
 }
 void resetSession() {
