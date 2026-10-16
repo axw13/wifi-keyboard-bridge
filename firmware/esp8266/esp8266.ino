@@ -56,7 +56,7 @@ void loop() {
       } else if (line.length() > 0 && line.length() < 64 && (line.startsWith("S,") || line.startsWith("M,"))) {
         bool valid = true;
         for (unsigned int i = 0; i < line.length(); i++)
-          if (!(line[i] == ',' || (line[i] >= '0' && line[i] <= '9') || (i == 0 && line[i] == 'S'))) valid = false;
+          if (!(line[i] == ',' || (line[i] >= '0' && line[i] <= '9') || (line[0] == 'M' && line[i] == '-') || (i == 0 && (line[i] == 'S' || line[i] == 'M')))) valid = false;
         if (valid) {
           Serial.println(line);
           lastFrame = millis();
