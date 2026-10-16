@@ -1,4 +1,4 @@
-"""Pico CircuitPython HID keyboard receiver. UART GP1 RX at 9600 baud."""
+"""Pico CircuitPython HID keyboard receiver. UART GP1 RX at 115200 baud."""
 import board
 import busio
 import time
@@ -7,7 +7,7 @@ import usb_hid
 keyboard = next((d for d in usb_hid.devices if d.usage_page == 1 and d.usage == 6), None)
 if keyboard is None:
     raise RuntimeError("USB HID keyboard device not enabled")
-uart = busio.UART(tx=board.GP0, rx=board.GP1, baudrate=9600, timeout=0)
+uart = busio.UART(tx=board.GP0, rx=board.GP1, baudrate=115200, timeout=0)
 line = bytearray()
 last_frame = time.monotonic()
 released = bytes(8)
@@ -36,4 +36,4 @@ while True:
     if time.monotonic() - last_frame > 2:
         keyboard.send_report(released)
         last_frame = time.monotonic()
-    time.sleep(0.002)
+    time.sleep(0.0005)
