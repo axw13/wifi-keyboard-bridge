@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Diagnostics;
 using System.Windows.Forms;
 
 namespace KeyboardBridge;
@@ -80,6 +81,8 @@ sealed class SettingsWindow : Form
         var input = AddTab(tabs, "Input");
         var performance = AddTab(tabs, "Performance");
         var diagnostics = AddTab(tabs, "Diagnostics");
+        var about = AddTab(tabs, "About");
+        PopulateAbout(about);
         // Tab pages keep independent row layouts; no more giant vertically scrolling form.
         var panel = connection;
 
@@ -252,6 +255,39 @@ sealed class SettingsWindow : Form
         for (int i = 1; i < rates.Length; i++)
             if (Math.Abs(rates[i] - currentInterval()) < Math.Abs(rates[closest] - currentInterval())) closest = i;
         updateRate.SelectedIndex = closest;
+    }
+
+    static void PopulateAbout(TableLayoutPanel panel)
+    {
+        var heading = new Label { Text = "Wi-Fi Keyboard Bridge", Font = new System.Drawing.Font(SystemFonts.DefaultFont.FontFamily, 15, System.Drawing.FontStyle.Bold), AutoSize = true };
+        panel.Controls.Add(heading, 0, 0);
+        panel.SetColumnSpan(heading, 2);
+        var description = new Label
+        {
+            Text = "Share keyboard and mouse input from a Windows PC with a second computer over a trusted Wi-Fi network, using a NodeMCU ESP8266 and a Raspberry Pi Pico as a USB HID device.",
+            AutoSize = true, MaximumSize = new System.Drawing.Size(470, 0)
+        };
+        panel.Controls.Add(description, 0, 1);
+        panel.SetColumnSpan(description, 2);
+        panel.RowStyles[1].Height = 66;
+        var hardware = new Label { Text = "Hardware: ESP8266 NodeMCU + Raspberry Pi Pico (RP2040)\nWindows client: .NET 8 / WinForms\nEmergency LOCAL: Ctrl + Alt + F10", AutoSize = true };
+        panel.Controls.Add(hardware, 0, 2);
+        panel.SetColumnSpan(hardware, 2);
+        panel.RowStyles[2].Height = 74;
+        AddRow(panel, 5, "Project author", new Label { Text = "axw13", AutoSize = true });
+        AddAboutLink(panel, 6, "GitHub profile", "github.com/axw13", "https://github.com/axw13");
+        AddAboutLink(panel, 7, "Source repository", "wifi-keyboard-bridge", "https://github.com/axw13/wifi-keyboard-bridge");
+    }
+
+    static void AddAboutLink(TableLayoutPanel panel, int row, string caption, string display, string url)
+    {
+        var link = new LinkLabel { Text = display, AutoSize = true };
+        link.LinkClicked += (_, _) =>
+        {
+            try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); }
+            catch (Exception ex) { MessageBox.Show(ex.Message, "Unable to open link"); }
+        };
+        AddRow(panel, row, caption, link);
     }
 
     static TableLayoutPanel AddTab(TabControl tabs, string title)
