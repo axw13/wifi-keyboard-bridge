@@ -283,7 +283,7 @@ static class HidMap
         if (vk == 0x30) return 39;
         if (vk >= 0x70 && vk <= 0x7B) return vk - 0x70 + 0x3A;
         // Dedicated keypad virtual keys do not share the top-row number usages.
-        if (vk >= 0x61 && vk <= 0x69) return vk - 0x61 + 0x1D; // Keypad 1-9 as number-row digits
+        if (vk >= 0x61 && vk <= 0x69) return vk - 0x61 + 0x1E; // Keypad 1-9 as number-row digits
         if (vk == 0x60) return 0x27; // Keypad 0 as number-row 0
         return vk switch {
             0x0D => 0x28, 0x1B => 0x29, 0x08 => 0x2A, 0x09 => 0x2B, 0x20 => 0x2C,
