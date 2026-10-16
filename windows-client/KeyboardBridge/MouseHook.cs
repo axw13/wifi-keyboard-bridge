@@ -59,14 +59,8 @@ sealed class MouseHook : IDisposable
                 default: return false;
             }
         }
-        // Split larger deltas into legal signed 8-bit HID movement segments.
-        do
-        {
-            int sx = Math.Clamp(dx, -127, 127), sy = Math.Clamp(dy, -127, 127);
-            if (!send(buttons, sx, sy, wheel)) return false;
-            dx -= sx; dy -= sy; wheel = 0;
-        } while (dx != 0 || dy != 0);
-        return true;
+        // Movement is coalesced and rate-limited by Transport instead of flooding TCP.
+        return send(buttons, dx, dy, wheel);
     }
 
     IntPtr OnMouse(int code, IntPtr wParam, IntPtr lParam)
