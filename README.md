@@ -60,3 +60,7 @@ A true Pico acknowledgment benchmark requires bidirectional UART: Pico GP0 TX â†
 ## Live diagnostics (experimental)
 
 The Windows Settings panel shows active mouse movement report count, average and maximum measured intervals between consecutive mouse movement reports (idle gaps over 100 ms excluded), and pending X/Y movement units. These are Windows sender timing measurements, not USB delivery timestamps. Firmware with the authenticated `STAT` command also exposes ESP8266 RSSI (dBm), free heap (KiB), UART forwarded frame count and byte count, refreshed about every 2 seconds. NodeMCU firmware must be updated to see these stats; Pico firmware/wiring do not change. No automatic rate adaptation is enabled. Compare benchmark P95, mouse timing and pending movement while LOCAL and while moving the mouse at the already-working 90 Hz setting.
+
+### Timing diagnostics (Windows client)
+
+The panel now separates the **scheduler tick interval** (how often the sender actually checks/flushes movement) from the **active mouse-report interval** (gaps between actual nonzero movement reports). Both provide rolling average/P95/maximum over the last 256 eligible intervals. **Scheduler lateness** is the positive difference between actual tick spacing and the selected target (e.g. 11 ms at 90 Hz). Mouse idle gaps and long pauses above 100 ms are excluded from these interval summaries. The existing NodeMCU UART counters report forwarded data only; they do not confirm Pico receipt. This change adds diagnostics only and does not change mouse pacing or firmware.
