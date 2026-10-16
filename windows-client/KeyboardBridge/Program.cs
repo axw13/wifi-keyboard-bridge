@@ -198,7 +198,7 @@ sealed class Transport : IDisposable
         {
             try
             {
-                using var socket = new TcpClient();
+                using var socket = new TcpClient { NoDelay = true };
                 await socket.ConnectAsync(cfg.Host, cfg.Port, cts.Token);
                 var stream = socket.GetStream();
                 using var writer = new StreamWriter(stream, new UTF8Encoding(false), 1024, leaveOpen: true) { AutoFlush = true };
