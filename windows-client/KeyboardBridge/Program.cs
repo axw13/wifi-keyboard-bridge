@@ -20,11 +20,14 @@ static class Program
         if (!firstInstance) { MessageBox.Show("Wi-Fi Keyboard Bridge is already running. Check the system tray.", "Already running"); return; }
         ApplicationConfiguration.Initialize();
         DiagnosticLog.Write("Application starting.");
-        var path = Path.Combine(AppContext.BaseDirectory, "appsettings.json");
-        if (!File.Exists(path)) { MessageBox.Show("Copy appsettings.example.json to appsettings.json and configure the NodeMCU."); return; }
-        var cfg = JsonSerializer.Deserialize<Settings>(File.ReadAllText(path), new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-        if (cfg == null || cfg.Token.Length < 16) { MessageBox.Show("Invalid configuration (token must be 16+ characters)."); return; }
-        Application.Run(new BridgeContext(cfg));
+        var cfg = ConfigStore.Load();
+        if (cfg is null)
+        {
+            using var setup = new FirstRunDialog();
+            if (setup.ShowDialog() != DialogResult.OK) return;
+            cfg = setup.Configuration;
+        }
+        if (cfg is not null) Application.Run(new BridgeContext(cfg));
     }
 }
 
@@ -215,8 +218,7 @@ sealed class BridgeContext : ApplicationContext
         }, newSettings =>
         {
             EmergencyLocal();
-            File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "appsettings.json"),
-                JsonSerializer.Serialize(newSettings, new JsonSerializerOptions { WriteIndented = true }));
+            ConfigStore.Save(newSettings);
             Application.Restart();
         });
         settingsWindow.SetMouseSettings(() => mouseRemote, () => mouseToggleVk, () => linkedToggle, (key, linked) =>
