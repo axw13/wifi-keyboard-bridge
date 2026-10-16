@@ -44,7 +44,7 @@ while True:
                         # not a timestamp for USB HID delivery or display updates.
                         probe = int(parts[1])
                         if 0 <= probe <= 65535:
-                            diag_uart.write(("A,%d\\n" % probe).encode("ascii"))
+                            diag_uart.write(("A,%d\n" % probe).encode("ascii"))
                     elif len(parts) == 5 and parts[0] == "M":
                         values = [int(v) for v in parts[1:]]
                         buttons, dx, dy, wheel = values
