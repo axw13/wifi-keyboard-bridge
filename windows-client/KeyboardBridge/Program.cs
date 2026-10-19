@@ -135,7 +135,7 @@ sealed class BridgeContext : ApplicationContext
         if (vk == mouseToggleVk && !pressed) mouseHotkeyLatch = false;
         // Sequence matching observes only new unmodified letter keydowns.
         // It never delays or hides user input: typed characters reach their owner.
-        if (pressed && !repeatedKeydown && vk >= 0x41 && vk <= 0x5A && mods == 0 && !physical.Any(k => k != vk && k >= 0x41 && k <= 0x5A))
+        if (pressed && !repeatedKeydown && vk >= 0x41 && vk <= 0x5A && mods == 0)
         {
             long now = Environment.TickCount64;
             recentKeys = now - recentKeyAt > 2000 ? "" : recentKeys;
