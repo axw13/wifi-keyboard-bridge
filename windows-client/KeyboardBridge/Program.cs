@@ -57,6 +57,10 @@ sealed class BridgeContext : ApplicationContext
     bool remote;
     bool hotkeyLatch;
     int toggleVk;
+    int keyboardMods = 3, mouseMods = 3, emergencyVk = 0x79, emergencyMods = 3;
+    string switchSequence = "";
+    string recentKeys = "";
+    long recentKeyAt;
     SettingsWindow? settingsWindow;
     double mouseSensitivity = 1.0;
     readonly string prefPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WifiKeyboardBridge", "preferences.json");
@@ -70,6 +74,11 @@ sealed class BridgeContext : ApplicationContext
         toggleVk = preferences.ToggleKey == 0x79 ? 0x7B : preferences.ToggleKey;
         mouseToggleVk = preferences.MouseToggleKey == 0x79 || preferences.MouseToggleKey == toggleVk ? 0x7A : preferences.MouseToggleKey;
         if (mouseToggleVk == toggleVk) mouseToggleVk = 0x78;
+        keyboardMods = preferences.KeyboardMods;
+        mouseMods = preferences.MouseMods;
+        emergencyVk = preferences.EmergencyKey;
+        emergencyMods = preferences.EmergencyMods;
+        switchSequence = preferences.SwitchSequence ?? "";
         linkedToggle = preferences.Linked;
         mouseSensitivity = Math.Clamp(preferences.MouseSensitivity, 0.25, 3.0);
         network.SetMouseTuning(mouseSensitivity, preferences.MouseUpdateMs);
@@ -96,28 +105,55 @@ sealed class BridgeContext : ApplicationContext
     bool HandleKey(int vk, bool pressed, bool injected)
     {
         if (injected) return false;
+        bool repeatedKeydown = pressed && physical.Contains(vk);
         if (pressed) physical.Add(vk); else physical.Remove(vk);
         bool ctrl = physical.Contains(0xA2) || physical.Contains(0xA3) || physical.Contains(0x11);
         bool alt = physical.Contains(0xA4) || physical.Contains(0xA5) || physical.Contains(0x12);
-        if (vk == 0x79 && pressed && ctrl && alt) // Ctrl+Alt+F10 emergency LOCAL
+        int mods = (ctrl ? 1 : 0) | (alt ? 2 : 0) |
+            (physical.Contains(0x10) || physical.Contains(0xA0) || physical.Contains(0xA1) ? 4 : 0) |
+            (physical.Contains(0x5B) || physical.Contains(0x5C) ? 8 : 0);
+        if (settingsWindow?.IsRecording == true) return settingsWindow.TryRecord(vk, pressed, mods);
+        if (pressed && ((vk == emergencyVk && mods == emergencyMods) || (vk == 0x79 && mods == 3)))
         {
             if (!emergencyHotkeyLatch) { emergencyHotkeyLatch = true; EmergencyLocal(); }
             swallowed.Add(vk);
             return true;
         }
-        if ((vk == toggleVk || (!linkedToggle && vk == mouseToggleVk)) && pressed && ctrl && alt)
+        if (pressed && ((vk == toggleVk && mods == keyboardMods) ||
+            (!linkedToggle && vk == mouseToggleVk && mods == mouseMods)))
         {
             if (!hotkeyLatch && !mouseHotkeyLatch)
             {
-                if (vk == toggleVk) { hotkeyLatch = true; Toggle(); if (linkedToggle) ToggleMouseTo(remote); }
+                if (vk == toggleVk && mods == keyboardMods) { hotkeyLatch = true; Toggle(); if (linkedToggle) ToggleMouseTo(remote); }
                 else { mouseHotkeyLatch = true; ToggleMouse(); }
             }
             swallowed.Add(vk);
             return true;
         }
-        if (vk == 0x79 && !pressed) emergencyHotkeyLatch = false;
+        if ((vk == emergencyVk || vk == 0x79) && !pressed) emergencyHotkeyLatch = false;
         if (vk == toggleVk && !pressed) hotkeyLatch = false;
         if (vk == mouseToggleVk && !pressed) mouseHotkeyLatch = false;
+        // Sequence matching observes only new unmodified letter keydowns.
+        // It never delays or hides user input: typed characters reach their owner.
+        if (pressed && !repeatedKeydown && vk >= 0x41 && vk <= 0x5A && mods == 0)
+        {
+            long now = Environment.TickCount64;
+            recentKeys = now - recentKeyAt > 2000 ? "" : recentKeys;
+            recentKeyAt = now;
+            recentKeys = (recentKeys + (char)('a' + vk - 0x41));
+            if (recentKeys.Length > 32) recentKeys = recentKeys[^32..];
+            if (switchSequence.Length >= 4 && recentKeys.EndsWith(switchSequence, StringComparison.Ordinal))
+            {
+                recentKeys = "";
+                // Defer the mode change until this final typed key is handled
+                // in its original mode; do not redirect it mid-keydown.
+                ui.Post(_ => {
+                    if (remote || mouseRemote) EmergencyLocal();
+                    else if (network.Connected) { Toggle(); ToggleMouseTo(true); }
+                }, null);
+            }
+        }
+        else if (pressed && mods != 0) recentKeys = "";
         // Lock keys must reach Windows as well as the remote HID device: Windows owns
         // the physical keyboard LEDs and its Num Lock state controls keypad VK translation.
         // This is a deliberate exception to local suppression while in REMOTE mode.
@@ -227,7 +263,7 @@ sealed class BridgeContext : ApplicationContext
                 throw new ArgumentException("Shortcut conflicts with mouse or reserved emergency Ctrl+Alt+F10.");
             toggleVk = vk;
             hotkeyLatch = false;
-            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.ManualMouseInterval, network.AdaptiveMouse, antiIdle.Enabled));
+            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.ManualMouseInterval, network.AdaptiveMouse, antiIdle.Enabled, keyboardMods, mouseMods, emergencyVk, emergencyMods, switchSequence));
         }, newSettings =>
         {
             EmergencyLocal();
@@ -241,27 +277,58 @@ sealed class BridgeContext : ApplicationContext
             mouseToggleVk = key;
             linkedToggle = linked;
             mouseHotkeyLatch = false;
-            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.ManualMouseInterval, network.AdaptiveMouse, antiIdle.Enabled));
+            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.ManualMouseInterval, network.AdaptiveMouse, antiIdle.Enabled, keyboardMods, mouseMods, emergencyVk, emergencyMods, switchSequence));
         });
         settingsWindow.SetMouseTuning(() => mouseSensitivity, () => network.MouseUpdateMs, (sensitivity, interval) =>
         {
             mouseSensitivity = sensitivity;
             network.SetMouseTuning(sensitivity, interval);
-            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, sensitivity, interval, network.AdaptiveMouse, antiIdle.Enabled));
+            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, sensitivity, interval, network.AdaptiveMouse, antiIdle.Enabled, keyboardMods, mouseMods, emergencyVk, emergencyMods, switchSequence));
         });
         settingsWindow.SetAdaptiveMouse(network.AdaptiveMouse, enabled =>
         {
             network.SetAdaptiveMouse(enabled);
-            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.ManualMouseInterval, enabled, antiIdle.Enabled));
+            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.ManualMouseInterval, enabled, antiIdle.Enabled, keyboardMods, mouseMods, emergencyVk, emergencyMods, switchSequence));
         });
         settingsWindow.SetAntiIdle(antiIdle.Enabled, () => antiIdle.Status(remote, mouseRemote, network.Connected), enabled =>
         {
             antiIdle.Enabled = enabled;
             network.UpdateAntiIdleState(enabled, remote || mouseRemote);
-            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.ManualMouseInterval, network.AdaptiveMouse, enabled));
+            UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.ManualMouseInterval, network.AdaptiveMouse, enabled, keyboardMods, mouseMods, emergencyVk, emergencyMods, switchSequence));
         });
+        settingsWindow.SetShortcutRecording(
+            () => (toggleVk, keyboardMods), () => (mouseToggleVk, mouseMods), () => (emergencyVk, emergencyMods),
+            (key, mods) => {
+                ValidateShortcut(key, mods, mouseToggleVk, mouseMods, emergencyVk, emergencyMods);
+                toggleVk = key; keyboardMods = mods; SavePrefs();
+            },
+            (key, mods) => {
+                ValidateShortcut(key, mods, toggleVk, keyboardMods, emergencyVk, emergencyMods);
+                mouseToggleVk = key; mouseMods = mods; SavePrefs();
+            },
+            (key, mods) => {
+                ValidateShortcut(key, mods, toggleVk, keyboardMods, mouseToggleVk, mouseMods);
+                emergencyVk = key; emergencyMods = mods; SavePrefs();
+            },
+            switchSequence, value => {
+                if (value.Length != 0 && (value.Length < 4 || value.Length > 32 || value.Any(c => c < 'a' || c > 'z')))
+                    throw new ArgumentException("Use 4–32 lowercase letters, or leave empty to disable.");
+                switchSequence = value; recentKeys = ""; SavePrefs();
+            });
         settingsWindow.Show();
     }
+    static void ValidateShortcut(int key, int mods, int key1, int mods1, int key2, int mods2)
+    {
+        if (mods == 0 || key is 0x10 or 0x11 or 0x12 or 0x5B or 0x5C or 0xA0 or 0xA1 or 0xA2 or 0xA3 or 0xA4 or 0xA5)
+            throw new ArgumentException("A shortcut needs a non-modifier key and at least one modifier.");
+        if ((key == 0x79 && mods == 3) || (key == key1 && mods == mods1) || (key == key2 && mods == mods2))
+            throw new ArgumentException("This key combination is already assigned.");
+    }
+    void SavePrefs() => UserPreferences.Save(prefPath,
+        new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity,
+            network.ManualMouseInterval, network.AdaptiveMouse, antiIdle.Enabled,
+            keyboardMods, mouseMods, emergencyVk, emergencyMods, switchSequence));
+
     protected override void ExitThreadCore()
     {
         EmergencyLocal();
