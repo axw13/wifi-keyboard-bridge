@@ -34,8 +34,8 @@ Connection details are redacted for public documentation.
 - Configurable startup, first-run connection wizard, standalone Windows build,
   single-instance protection and connection-aware tray status
 - Optional **remote anti-idle** mouse mover: when enabled and both inputs
-  are LOCAL, waits for 60 seconds of local inactivity, then sends a tiny
-  movement to the *receiving computer* about every 30 seconds; disabled
+  are LOCAL, sends a small HID mouse movement to the *receiving computer* every 15 seconds,
+  even while using the main PC; disabled
   immediately if either input is REMOTE or the bridge disconnects
 - Optional CircuitPython `boot.py` to hide the CIRCUITPY mass-storage drive
   while keeping USB keyboard **and mouse** HID
