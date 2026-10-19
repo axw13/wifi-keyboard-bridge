@@ -12,6 +12,13 @@ client, USB HID forwarding, numpad mapping, Pico UART diagnostics, and remote
 anti-idle were tested in the author's setup. Hardware variants and
 platform-specific behavior may differ.
 
+
+### Custom shortcuts and typed switching
+
+In **Settings → Input**, click **Record** beside keyboard, mouse, or emergency-local shortcut, then hold a modifier (Ctrl, Alt, Shift, or Win) and press the desired key. Press Escape to cancel. Conflicting combinations are rejected. **Ctrl+Alt+F10 always remains an emergency LOCAL fallback**, even after customizing the visible emergency shortcut.
+
+You can also configure a lowercase letter sequence (4–32 characters), for example `asdffdsa`, to switch **both** keyboard and mouse between LOCAL and REMOTE. The sequence is detected by the Windows client within a 2-second typing window and is passed through normally to the current PC, so it can appear in text fields. Clear the field to disable this trigger. This feature runs entirely in the Windows client and does not change NodeMCU/Pico firmware or mouse pacing.
+
 ## Application screenshots
 
 The screenshots below show the Windows configuration and monitoring interface.

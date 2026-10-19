@@ -4,7 +4,7 @@ using System.Windows.Forms;
 
 namespace KeyboardBridge;
 
-record UserPreferences(int ToggleKey, int MouseToggleKey = 0x7A, bool Linked = false, double MouseSensitivity = 1.0, int MouseUpdateMs = 16, bool AdaptiveMouse = false, bool AntiIdle = false)
+record UserPreferences(int ToggleKey, int MouseToggleKey = 0x7A, bool Linked = false, double MouseSensitivity = 1.0, int MouseUpdateMs = 16, bool AdaptiveMouse = false, bool AntiIdle = false, int KeyboardMods = 3, int MouseMods = 3, int EmergencyKey = 0x79, int EmergencyMods = 3, string SwitchSequence = "")
 {
     public static UserPreferences Load(string path)
     {
@@ -13,7 +13,7 @@ record UserPreferences(int ToggleKey, int MouseToggleKey = 0x7A, bool Linked = f
             if (File.Exists(path))
             {
                 var prefs = JsonSerializer.Deserialize<UserPreferences>(File.ReadAllText(path));
-                if (prefs != null && prefs.ToggleKey >= 0x70 && prefs.ToggleKey <= 0x7B)
+                if (prefs != null && prefs.ToggleKey > 0 && prefs.ToggleKey <= 0xFE)
                     return prefs;
             }
         }
@@ -47,7 +47,7 @@ sealed class SettingsWindow : Form
     readonly TextBox host = new() { Width = 160 };
     readonly NumericUpDown port = new() { Minimum = 1, Maximum = 65535, Width = 100 };
     readonly TextBox token = new() { Width = 160, UseSystemPasswordChar = true };
-    readonly ComboBox mouseHotkey = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 125 };
+    readonly Button mouseHotkey = new() { Text = "Record mouse shortcut", AutoSize = true };
     readonly NumericUpDown sensitivity = new() { Minimum = 25, Maximum = 300, Increment = 10, DecimalPlaces = 0, Width = 90, Value = 100 };
     readonly ComboBox updateRate = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 140 };
     Action<double,int>? saveMouseTuning;
@@ -62,7 +62,55 @@ sealed class SettingsWindow : Form
     Func<int>? getMouseHotkey;
     Func<bool>? getLinked;
     Action<int,bool>? saveMousePreferences;
-    readonly ComboBox hotkey = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 125 };
+    readonly Button hotkey = new() { Text = "Record keyboard shortcut", AutoSize = true };
+    readonly Button emergencyHotkey = new() { Text = "Record emergency shortcut", AutoSize = true };
+    readonly TextBox sequence = new() { Width = 175, MaxLength = 32 };
+    Action<int,int>? keyboardSave;
+    Action<int,int>? mouseSave;
+    Action<int,int>? emergencySave;
+    Action<string>? sequenceSave;
+    string? capturing;
+    public bool IsRecording => capturing != null;
+    public static string ShortcutText(int key, int mods) =>
+        ((mods & 1) != 0 ? "Ctrl+" : "") + ((mods & 2) != 0 ? "Alt+" : "") +
+        ((mods & 4) != 0 ? "Shift+" : "") + ((mods & 8) != 0 ? "Win+" : "") +
+        ((Keys)key).ToString();
+    public bool TryRecord(int key, bool down, int mods)
+    {
+        if (capturing == null) return false;
+        if (down && key is not (0x10 or 0x11 or 0x12 or 0x5B or 0x5C or 0xA0 or 0xA1 or 0xA2 or 0xA3 or 0xA4 or 0xA5))
+        {
+            string target = capturing;
+            capturing = null;
+            try
+            {
+                if (key == 0x1B) return true; // Escape cancels
+                if (mods == 0) throw new ArgumentException("Choose at least one modifier (Ctrl, Alt, Shift or Win).");
+                if (target == "keyboard") keyboardSave?.Invoke(key, mods);
+                if (target == "mouse") mouseSave?.Invoke(key, mods);
+                if (target == "emergency") emergencySave?.Invoke(key, mods);
+            }
+            catch (Exception ex) { MessageBox.Show(this, ex.Message, "Shortcut not saved"); }
+            RefreshShortcutLabels?.Invoke();
+        }
+        return true;
+    }
+    Action? RefreshShortcutLabels;
+    public void SetShortcutRecording(Func<(int key,int mods)> keyboard, Func<(int key,int mods)> mouse,
+        Func<(int key,int mods)> emergency, Action<int,int> saveKeyboard, Action<int,int> saveMouse,
+        Action<int,int> saveEmergency, string initialSequence, Action<string> saveSequence)
+    {
+        keyboardSave = saveKeyboard; mouseSave = saveMouse; emergencySave = saveEmergency;
+        sequenceSave = saveSequence;
+        sequence.Text = initialSequence;
+        RefreshShortcutLabels = () => {
+            var k = keyboard(); var m = mouse(); var e = emergency();
+            hotkey.Text = "Keyboard: " + ShortcutText(k.key,k.mods) + " (record)";
+            mouseHotkey.Text = "Mouse: " + ShortcutText(m.key,m.mods) + " (record)";
+            emergencyHotkey.Text = "Emergency: " + ShortcutText(e.key,e.mods) + " (record)";
+        };
+        RefreshShortcutLabels();
+    }
     readonly System.Windows.Forms.Timer timer = new() { Interval = 500 };
 
     public SettingsWindow(Settings cfg, Transport network, Func<bool> remote, Func<int> getHotkey, Action<int> setHotkey, Action<Settings> applyConnection)
@@ -101,23 +149,13 @@ sealed class SettingsWindow : Form
         AddRow(connection, 6, "Reports sent", reports);
         AddRow(connection, 7, "Disconnections", reconnects);
 
-        for (int n = 1; n <= 12; n++) hotkey.Items.Add("Ctrl + Alt + F" + n);
-        hotkey.SelectedIndex = getHotkey() - 0x70;
         AddRow(input, 0, "Keyboard shortcut", hotkey);
 
-        var apply = new Button { Text = "Save shortcut", AutoSize = true };
-        apply.Click += (_, _) =>
-        {
-            try
-            {
-                if (hotkey.SelectedIndex < 0) return;
-                setHotkey(0x70 + hotkey.SelectedIndex);
-                MessageBox.Show(this, "Shortcut saved. Release Ctrl and Alt before switching again.",
-                    "Keyboard Bridge", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            }
-            catch (Exception ex) { MessageBox.Show(this, ex.Message, "Save failed"); }
-        };
-        input.Controls.Add(apply, 1, 1);
+        hotkey.Click += (_, _) => { capturing = "keyboard"; hotkey.Text = "Press combination (Esc cancels)..."; };
+        mouseHotkey.Click += (_, _) => { capturing = "mouse"; mouseHotkey.Text = "Press combination (Esc cancels)..."; };
+        emergencyHotkey.Click += (_, _) => { capturing = "emergency"; emergencyHotkey.Text = "Press combination (Esc cancels)..."; };
+        input.Controls.Add(new Label { Text = "Click a shortcut to record; hold modifiers and press a key.", AutoSize = true }, 0, 1);
+        input.SetColumnSpan(input.GetControlFromPosition(0,1)!,2);
         var saveConnection = new Button { Text = "Save connection & restart", AutoSize = true };
         saveConnection.Click += (_, _) =>
         {
@@ -143,21 +181,13 @@ sealed class SettingsWindow : Form
         };
         AddRow(input, 2, "Mouse shortcut", mouseHotkey);
         input.Controls.Add(linked, 1, 3);
-        var saveMouse = new Button { Text = "Save mouse options", AutoSize = true };
-        saveMouse.Click += (_, _) =>
-        {
-            if (mouseHotkey.SelectedIndex < 0) return;
-            if (!linked.Checked && mouseHotkey.SelectedIndex == hotkey.SelectedIndex)
-            {
-                MessageBox.Show(this, "Use separate F keys, or enable linked switching."); return;
-            }
-            try { saveMousePreferences?.Invoke(0x70 + mouseHotkey.SelectedIndex, linked.Checked); }
+        var saveMouse = new Button { Text = "Save linked mode", AutoSize = true };
+        saveMouse.Click += (_, _) => {
+            try { saveMousePreferences?.Invoke(getMouseHotkey?.Invoke() ?? 0x7A, linked.Checked); }
             catch (Exception ex) { MessageBox.Show(this, ex.Message, "Shortcut conflict"); }
         };
         input.Controls.Add(saveMouse, 1, 4);
-        var emergencyNote = new Label { Text = "Emergency LOCAL: Ctrl + Alt + F10 (reserved)", AutoSize = true };
-        input.Controls.Add(emergencyNote, 0, 5);
-        input.SetColumnSpan(emergencyNote, 2);
+        input.Controls.Add(emergencyHotkey, 1, 5);
         var runBenchmark = new Button { Text = "Benchmark (10 seconds)", AutoSize = true };
         runBenchmark.Click += (_, _) =>
         {
@@ -225,6 +255,13 @@ sealed class SettingsWindow : Form
         input.Controls.Add(antiIdleHint, 0, 7);
         input.SetColumnSpan(antiIdleHint, 2);
         input.RowStyles[7].Height = 70;
+        AddRow(input, 9, "Switch both: typed sequence", sequence);
+        var sequenceButton = new Button { Text = "Save sequence", AutoSize = true };
+        sequenceButton.Click += (_, _) => {
+            try { sequenceSave?.Invoke(sequence.Text.Trim()); }
+            catch (Exception ex) { MessageBox.Show(this, ex.Message, "Invalid sequence"); }
+        };
+        input.Controls.Add(sequenceButton, 1, 10);
         input.Controls.Add(antiIdleStatus, 0, 8);
         input.SetColumnSpan(antiIdleStatus, 2);
         timer.Tick += (_, _) => antiIdleStatus.Text = getAntiIdleStatus?.Invoke() ?? "";
@@ -246,8 +283,6 @@ sealed class SettingsWindow : Form
         getMouseHotkey = mouseKey;
         getLinked = linkedMode;
         saveMousePreferences = save;
-        for (int n = 1; n <= 12; n++) mouseHotkey.Items.Add("Ctrl + Alt + F" + n);
-        mouseHotkey.SelectedIndex = Math.Clamp(mouseKey() - 0x70, 0, 11);
         linked.Checked = linkedMode();
     }
 
