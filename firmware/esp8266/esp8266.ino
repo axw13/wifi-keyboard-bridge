@@ -1,5 +1,6 @@
 #include <ESP8266WiFi.h>
 #include <SoftwareSerial.h>
+#include <EEPROM.h>
 #include "secrets.h"  // Create from secrets.example.h; never commit credentials
 
 // Diagnostic return uses isolated GPIO14/D5, not USB-UART GPIO3/RX.
@@ -16,6 +17,26 @@ bool picoProbePending = false;
 unsigned int picoProbeId = 0;
 unsigned long picoProbeStart = 0;
 unsigned long picoProbeTimeouts = 0;
+bool antiIdleEnabled = false;
+bool remoteInputActive = false;
+unsigned long lastIdleMove = 0;
+bool idleMoveRight = true;
+
+void saveAntiIdle(bool enabled) {
+  if (antiIdleEnabled == enabled) return;
+  antiIdleEnabled = enabled;
+  EEPROM.write(0, enabled ? 0xA5 : 0x00);
+  EEPROM.commit();
+}
+void tickAntiIdle() {
+  if (!antiIdleEnabled || remoteInputActive) return;
+  unsigned long now = millis();
+  if (now - lastIdleMove < 15000UL) return;
+  Serial.println(idleMoveRight ? "M,0,4,0,0" : "M,0,-4,0,0");
+  idleMoveRight = !idleMoveRight;
+  lastIdleMove = now;
+}
+
 
 void readPicoReplies() {
   // Bound processing so telemetry cannot starve keyboard/mouse forwarding.
@@ -59,6 +80,8 @@ void resetSession() {
   line = "";
 }
 void setup() {
+  EEPROM.begin(16);
+  antiIdleEnabled = EEPROM.read(0) == 0xA5;
   Serial.begin(115200);  // GPIO1 TX → Pico GP1 RX; must match Pico UART
   picoDiagnostics.begin(115200);  // GPIO14/D5 RX ← Pico GP0 TX (diagnostics only)
   WiFi.mode(WIFI_STA);
@@ -70,6 +93,7 @@ void setup() {
 }
 void loop() {
   readPicoReplies();
+  tickAntiIdle();
   if (!client || !client.connected()) {
     if (authorized) resetSession();
     WiFiClient candidate = server.available();
@@ -112,6 +136,16 @@ void loop() {
           picoProbeStart = micros();
           picoProbePending = true;
         }
+      } else if (line == "IDLE,ON" || line == "IDLE,OFF") {
+        saveAntiIdle(line == "IDLE,ON");
+        client.println(antiIdleEnabled ? "IDLE,ON" : "IDLE,OFF");
+      } else if (line == "IDLE,PAUSE") {
+        remoteInputActive = true;
+      } else if (line == "IDLE,RESUME") {
+        remoteInputActive = false;
+        lastIdleMove = millis();
+      } else if (line == "IDLE?") {
+        client.println(antiIdleEnabled ? "IDLE,ON" : "IDLE,OFF");
       } else if (line == "PING") {
         client.println("PONG");
       } else if (line.length() > 0 && line.length() < 64 && (line.startsWith("S,") || line.startsWith("M,"))) {
