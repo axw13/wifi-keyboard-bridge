@@ -43,4 +43,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: WiFi-Keyboard-Bridge-win-x64.zip
-          prerelease: true
+          prerelease: false
