@@ -76,7 +76,7 @@ sealed class BridgeContext : ApplicationContext
         network.SetAdaptiveMouse(preferences.AdaptiveMouse);
         antiIdle.Enabled = preferences.AntiIdle;
         tray = new NotifyIcon { Icon = disconnectedIcon, Visible = true, Text = "Wi-Fi Bridge: Connecting..." };
-        trayTimer.Tick += (_, _) => { UpdateTray(); antiIdle.Tick(remote, mouseRemote, network.Connected, dx => network.SendMouse(0, dx, 0, 0)); };
+        trayTimer.Tick += (_, _) => { UpdateTray(); network.UpdateAntiIdleState(antiIdle.Enabled, remote || mouseRemote); };
         trayTimer.Start();
         UpdateTray();
         var menu = new ContextMenuStrip();
@@ -254,9 +254,10 @@ sealed class BridgeContext : ApplicationContext
             network.SetAdaptiveMouse(enabled);
             UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.ManualMouseInterval, enabled, antiIdle.Enabled));
         });
-        settingsWindow.SetAntiIdle(antiIdle.Enabled, enabled =>
+        settingsWindow.SetAntiIdle(antiIdle.Enabled, () => antiIdle.Status(remote, mouseRemote, network.Connected), enabled =>
         {
             antiIdle.Enabled = enabled;
+            network.UpdateAntiIdleState(enabled, remote || mouseRemote);
             UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.ManualMouseInterval, network.AdaptiveMouse, enabled));
         });
         settingsWindow.Show();
@@ -533,6 +534,19 @@ sealed class Transport : IDisposable
         this.disconnected = disconnected;
         _ = Task.Run(Run);
     }
+    // Distinct HID frame: bypass motion coalescing and mouse sensitivity. 
+    // Enqueued on the transport worker; never moves the local Windows cursor.
+    bool? idleEnabledSent;
+    bool? idlePausedSent;
+    public void UpdateAntiIdleState(bool enabled, bool paused)
+    {
+        if (!Connected) { idleEnabledSent = null; idlePausedSent = null; return; }
+        if (idleEnabledSent != enabled && queue.TryAdd(enabled ? "IDLE,ON" : "IDLE,OFF"))
+            idleEnabledSent = enabled;
+        if (idlePausedSent != paused && queue.TryAdd(paused ? "IDLE,PAUSE" : "IDLE,RESUME"))
+            idlePausedSent = paused;
+    }
+
     public bool SendMouseMovement(int dx, int dy)
     {
         if (!Connected) return false;
