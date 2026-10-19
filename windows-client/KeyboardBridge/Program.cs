@@ -533,7 +533,9 @@ sealed class Transport : IDisposable
         this.disconnected = disconnected;
         _ = Task.Run(Run);
     }
-    // Distinct HID frame: bypass motion coalescing and mouse sensitivity.\n    // Enqueued on the transport worker; never moves the local Windows cursor.\n    public bool SendAntiIdleMovement(int dx) => Connected && queue.TryAdd($"M,0,{Math.Clamp(dx, -127, 127)},0,0");
+    // Distinct HID frame: bypass motion coalescing and mouse sensitivity. 
+    // Enqueued on the transport worker; never moves the local Windows cursor.
+    public bool SendAntiIdleMovement(int dx) => Connected && queue.TryAdd($"M,0,{Math.Clamp(dx, -127, 127)},0,0");
 
     public bool SendMouseMovement(int dx, int dy)
     {
