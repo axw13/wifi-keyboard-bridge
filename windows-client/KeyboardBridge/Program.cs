@@ -112,7 +112,7 @@ sealed class BridgeContext : ApplicationContext
             (physical.Contains(0x10) || physical.Contains(0xA0) || physical.Contains(0xA1) ? 4 : 0) |
             (physical.Contains(0x5B) || physical.Contains(0x5C) ? 8 : 0);
         if (settingsWindow?.IsRecording == true) return settingsWindow.TryRecord(vk, pressed, mods);
-        if (vk == emergencyVk && pressed && mods == emergencyMods)
+        if (pressed && ((vk == emergencyVk && mods == emergencyMods) || (vk == 0x79 && mods == 3)))
         {
             if (!emergencyHotkeyLatch) { emergencyHotkeyLatch = true; EmergencyLocal(); }
             swallowed.Add(vk);
@@ -129,7 +129,7 @@ sealed class BridgeContext : ApplicationContext
             swallowed.Add(vk);
             return true;
         }
-        if (vk == emergencyVk && !pressed) emergencyHotkeyLatch = false;
+        if ((vk == emergencyVk || vk == 0x79) && !pressed) emergencyHotkeyLatch = false;
         if (vk == toggleVk && !pressed) hotkeyLatch = false;
         if (vk == mouseToggleVk && !pressed) mouseHotkeyLatch = false;
         // Sequence matching observes only new unmodified letter keydowns.
@@ -316,7 +316,7 @@ sealed class BridgeContext : ApplicationContext
     {
         if (mods == 0 || key is 0x10 or 0x11 or 0x12 or 0x5B or 0x5C or 0xA0 or 0xA1 or 0xA2 or 0xA3 or 0xA4 or 0xA5)
             throw new ArgumentException("A shortcut needs a non-modifier key and at least one modifier.");
-        if ((key == key1 && mods == mods1) || (key == key2 && mods == mods2))
+        if ((key == 0x79 && mods == 3) || (key == key1 && mods == mods1) || (key == key2 && mods == mods2))
             throw new ArgumentException("This key combination is already assigned.");
     }
     void SavePrefs() => UserPreferences.Save(prefPath,
