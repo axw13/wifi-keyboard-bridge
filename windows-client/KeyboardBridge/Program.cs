@@ -144,8 +144,12 @@ sealed class BridgeContext : ApplicationContext
             if (switchSequence.Length >= 4 && recentKeys.EndsWith(switchSequence, StringComparison.Ordinal))
             {
                 recentKeys = "";
-                if (remote || mouseRemote) EmergencyLocal();
-                else if (network.Connected) { Toggle(); ToggleMouseTo(true); }
+                // Defer the mode change until this final typed key is handled
+                // in its original mode; do not redirect it mid-keydown.
+                ui.Post(_ => {
+                    if (remote || mouseRemote) EmergencyLocal();
+                    else if (network.Connected) { Toggle(); ToggleMouseTo(true); }
+                }, null);
             }
         }
         else if (pressed && mods != 0) recentKeys = "";
