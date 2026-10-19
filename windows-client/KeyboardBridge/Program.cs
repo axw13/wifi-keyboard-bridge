@@ -76,7 +76,7 @@ sealed class BridgeContext : ApplicationContext
         network.SetAdaptiveMouse(preferences.AdaptiveMouse);
         antiIdle.Enabled = preferences.AntiIdle;
         tray = new NotifyIcon { Icon = disconnectedIcon, Visible = true, Text = "Wi-Fi Bridge: Connecting..." };
-        trayTimer.Tick += (_, _) => { UpdateTray(); antiIdle.Tick(remote, mouseRemote, network.Connected, dx => network.SendMouse(0, dx, 0, 0)); };
+        trayTimer.Tick += (_, _) => { UpdateTray(); antiIdle.Tick(remote, mouseRemote, network.Connected, dx => network.SendAntiIdleMovement(dx)); };
         trayTimer.Start();
         UpdateTray();
         var menu = new ContextMenuStrip();
@@ -254,7 +254,7 @@ sealed class BridgeContext : ApplicationContext
             network.SetAdaptiveMouse(enabled);
             UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.ManualMouseInterval, enabled, antiIdle.Enabled));
         });
-        settingsWindow.SetAntiIdle(antiIdle.Enabled, enabled =>
+        settingsWindow.SetAntiIdle(antiIdle.Enabled, () => antiIdle.Status(remote, mouseRemote, network.Connected), enabled =>
         {
             antiIdle.Enabled = enabled;
             UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.ManualMouseInterval, network.AdaptiveMouse, enabled));
@@ -533,6 +533,8 @@ sealed class Transport : IDisposable
         this.disconnected = disconnected;
         _ = Task.Run(Run);
     }
+    // Distinct HID frame: bypass motion coalescing and mouse sensitivity.\n    // Enqueued on the transport worker; never moves the local Windows cursor.\n    public bool SendAntiIdleMovement(int dx) => Connected && queue.TryAdd($"M,0,{Math.Clamp(dx, -127, 127)},0,0");
+
     public bool SendMouseMovement(int dx, int dy)
     {
         if (!Connected) return false;
