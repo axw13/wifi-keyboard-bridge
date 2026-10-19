@@ -105,6 +105,7 @@ sealed class BridgeContext : ApplicationContext
     bool HandleKey(int vk, bool pressed, bool injected)
     {
         if (injected) return false;
+        bool repeatedKeydown = pressed && physical.Contains(vk);
         if (pressed) physical.Add(vk); else physical.Remove(vk);
         bool ctrl = physical.Contains(0xA2) || physical.Contains(0xA3) || physical.Contains(0x11);
         bool alt = physical.Contains(0xA4) || physical.Contains(0xA5) || physical.Contains(0x12);
@@ -134,7 +135,7 @@ sealed class BridgeContext : ApplicationContext
         if (vk == mouseToggleVk && !pressed) mouseHotkeyLatch = false;
         // Sequence matching observes only new unmodified letter keydowns.
         // It never delays or hides user input: typed characters reach their owner.
-        if (pressed && vk >= 0x41 && vk <= 0x5A && mods == 0 && !physical.Any(k => k != vk && k >= 0x41 && k <= 0x5A))
+        if (pressed && !repeatedKeydown && vk >= 0x41 && vk <= 0x5A && mods == 0 && !physical.Any(k => k != vk && k >= 0x41 && k <= 0x5A))
         {
             long now = Environment.TickCount64;
             recentKeys = now - recentKeyAt > 2000 ? "" : recentKeys;
