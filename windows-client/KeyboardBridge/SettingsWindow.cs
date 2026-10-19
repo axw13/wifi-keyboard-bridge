@@ -221,7 +221,7 @@ sealed class SettingsWindow : Form
         performance.Controls.Add(saveTuning, 1, 2);
         performance.Controls.Add(adaptive, 1, 3);
         input.Controls.Add(antiIdle, 1, 6);
-        var antiIdleHint = new Label { Text = "While both inputs are LOCAL, sends a tiny mouse movement to the REMOTE PC every 15 seconds, even if you are using this PC. Never moves the local cursor. Pauses when either input is REMOTE. Default OFF.", AutoSize = true, MaximumSize = new System.Drawing.Size(340, 0) };
+        var antiIdleHint = new Label { Text = "NodeMCU moves the remote PC mouse every 15 seconds, even if this Windows PC is OFF. Setting survives NodeMCU restarts. Pauses while either input is REMOTE. Requires updated NodeMCU firmware.", AutoSize = true, MaximumSize = new System.Drawing.Size(340, 0) };
         input.Controls.Add(antiIdleHint, 0, 7);
         input.SetColumnSpan(antiIdleHint, 2);
         input.RowStyles[7].Height = 70;
