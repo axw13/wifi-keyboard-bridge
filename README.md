@@ -117,6 +117,6 @@ wider deployment.
 
 ### Automatic NodeMCU discovery (mDNS)
 
-Updated NodeMCU firmware advertises `wifi-keyboard-bridge.local` and DNS-SD service `_keyboardbridge._tcp.local` (TCP 7777). In the Windows client's **Connection** tab (or initial setup), select **Automatic (mDNS)**. On each connection or reconnection attempt, Windows asks the local network for the NodeMCU address. If discovery is unavailable, the client uses the saved manual IP/hostname as fallback. Manual-only mode remains available and is the default for existing settings.
+Updated NodeMCU firmware advertises `wifi-keyboard-bridge.local` and DNS-SD service `_keyboardbridge._tcp.local` (TCP 7777). In the Windows client's **Connection** tab (or initial setup), select **Automatic detect NodeMCU**. On each connection or reconnection attempt, Windows asks the local network for the NodeMCU address. After a successful authenticated mDNS connection, the discovered IP is shown in Connection settings and saved as the manual fallback for future reconnects. If discovery is unavailable, the client uses that saved IP/hostname. Manual-only mode remains available and is the default for existing settings.
 
 **Important:** Flash the updated ESP8266 firmware to enable mDNS advertising. The Windows host and NodeMCU generally must be on the same VLAN/broadcast domain unless an mDNS reflector (for example pfSense Avahi) is configured. UDP 5353 multicast must be permitted. Your existing authentication token and Pico firmware are unchanged.
