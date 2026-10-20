@@ -1,6 +1,7 @@
 #include <ESP8266WiFi.h>
 #include <SoftwareSerial.h>
 #include <EEPROM.h>
+#include <ESP8266mDNS.h>
 #include "secrets.h"  // Create from secrets.example.h; never commit credentials
 
 // Diagnostic return uses isolated GPIO14/D5, not USB-UART GPIO3/RX.
@@ -90,8 +91,11 @@ void setup() {
   while (WiFi.status() != WL_CONNECTED) delay(400);
   server.begin();
   server.setNoDelay(true);
+  if (MDNS.begin("wifi-keyboard-bridge"))
+    MDNS.addService("keyboardbridge", "tcp", 7777);
 }
 void loop() {
+  MDNS.update();
   readPicoReplies();
   tickAntiIdle();
   if (!client || !client.connected()) {
