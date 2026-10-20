@@ -45,6 +45,7 @@ static class ConfigStore
 sealed class FirstRunDialog : Form
 {
     readonly TextBox host = new() { Width = 240 };
+    readonly CheckBox autoDiscovery = new() { Text = "Automatic detect NodeMCU (manual IP fallback)", AutoSize = true };
     readonly NumericUpDown port = new() { Minimum = 1, Maximum = 65535, Width = 100, Value = 7777 };
     readonly TextBox token = new() { Width = 240, UseSystemPasswordChar = true };
     public Settings? Configuration { get; private set; }
@@ -52,11 +53,11 @@ sealed class FirstRunDialog : Form
     public FirstRunDialog()
     {
         Text = "Wi-Fi Keyboard Bridge — Connection setup";
-        Width = 480; Height = 300; MinimumSize = new System.Drawing.Size(450, 280);
+        Width = 480; Height = 350; MinimumSize = new System.Drawing.Size(450, 330);
         FormBorderStyle = FormBorderStyle.FixedDialog; MaximizeBox = false; MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
         var panel = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(18),
-            ColumnCount = 2, RowCount = 6 };
+            ColumnCount = 2, RowCount = 7 };
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 135));
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         Controls.Add(panel);
@@ -65,6 +66,7 @@ sealed class FirstRunDialog : Form
         panel.Controls.Add(info, 0, 0); panel.SetColumnSpan(info, 2);
         panel.Controls.Add(new Label { Text = "NodeMCU IP / host", AutoSize = true }, 0, 1);
         panel.Controls.Add(host, 1, 1);
+        panel.Controls.Add(autoDiscovery, 1, 5);
         panel.Controls.Add(new Label { Text = "TCP port", AutoSize = true }, 0, 2);
         panel.Controls.Add(port, 1, 2);
         panel.Controls.Add(new Label { Text = "Shared token", AutoSize = true }, 0, 3);
@@ -72,7 +74,7 @@ sealed class FirstRunDialog : Form
         var save = new Button { Text = "Save and connect", AutoSize = true };
         save.Click += (_, _) =>
         {
-            var cfg = new Settings(host.Text.Trim(), (int)port.Value, token.Text);
+            var cfg = new Settings(host.Text.Trim(), (int)port.Value, token.Text, autoDiscovery.Checked);
             if (!ConfigStore.IsValid(cfg))
             {
                 MessageBox.Show(this, "Enter a valid host and token (at least 16 characters).",
