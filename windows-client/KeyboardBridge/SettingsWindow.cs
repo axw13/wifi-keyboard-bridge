@@ -371,6 +371,11 @@ sealed class SettingsWindow : Form
 
     void RefreshStatus()
     {
+        // Reflect the authenticated mDNS address, without overwriting edits in progress.
+        if (autoDiscovery.Checked && !host.Focused &&
+            network.Connected && network.ActiveHost is { } resolvedIp &&
+            host.Text != resolvedIp)
+            host.Text = resolvedIp;
         state.Text = (network.Connected ? "Connected" : "Disconnected") +
             " — K:" + (remote() ? "R" : "L") + " M:" + (isMouseRemote?.Invoke() == true ? "R" : "L");
         uptime.Text = network.ConnectedSince is { } since
