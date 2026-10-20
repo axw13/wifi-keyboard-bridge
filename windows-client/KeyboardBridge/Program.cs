@@ -426,6 +426,10 @@ sealed class KeyboardHook : IDisposable
 sealed class Transport : IDisposable
 {
     readonly Settings cfg;
+    string fallbackHost;
+    string? activeHost;
+    public string? ActiveHost => Volatile.Read(ref activeHost);
+    public string FallbackHost => Volatile.Read(ref fallbackHost);
     readonly Action disconnected;
     readonly BlockingCollection<string> queue = new(256);
     readonly CancellationTokenSource cts = new();
@@ -598,6 +602,7 @@ sealed class Transport : IDisposable
     public Transport(Settings cfg, Action disconnected)
     {
         this.cfg = cfg;
+        fallbackHost = cfg.Host;
         this.disconnected = disconnected;
         _ = Task.Run(Run);
     }
@@ -707,7 +712,7 @@ sealed class Transport : IDisposable
             try
             {
                 using var socket = new TcpClient { NoDelay = true };
-                string target = cfg.Host;
+                string target = Volatile.Read(ref fallbackHost);
                 if (cfg.AutoDiscover)
                 {
                     string? discovered = await MdnsDiscovery.ResolveAsync(cts.Token);
@@ -725,6 +730,14 @@ sealed class Transport : IDisposable
                 await writer.WriteLineAsync("AUTH " + cfg.Token);
                 if (await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(3), cts.Token) != "OK")
                     throw new IOException("Authentication failed");
+                // Only trust and store a discovered address after shared-token authentication.
+                Volatile.Write(ref activeHost, target);
+                if (cfg.AutoDiscover && target != Volatile.Read(ref fallbackHost))
+                {
+                    Volatile.Write(ref fallbackHost, target);
+                    try { ConfigStore.Save(cfg with { Host = target }); }
+                    catch (Exception ex) { DiagnosticLog.Write("Unable to save discovered NodeMCU IP: " + ex.GetType().Name); }
+                }
                 connected = true;
                 Volatile.Write(ref espRssi, int.MinValue);
                 connectedSince = DateTimeOffset.UtcNow;
@@ -839,6 +852,7 @@ sealed class Transport : IDisposable
             catch (Exception ex) { DiagnosticLog.Write("Transport retry: " + ex.GetType().Name + ": " + ex.Message); }
             finally
             {
+                Volatile.Write(ref activeHost, null);
                 if (connected) { connected = false; connectedSince = null; Interlocked.Increment(ref reconnects); DiagnosticLog.Write("Transport connection ended."); disconnected(); }
                 ClearMouseMotion();
                 Interlocked.Exchange(ref mouseLastSentTick, 0);
