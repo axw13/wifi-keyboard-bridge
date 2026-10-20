@@ -45,7 +45,7 @@ static class ConfigStore
 sealed class FirstRunDialog : Form
 {
     readonly TextBox host = new() { Width = 240 };
-    readonly CheckBox autoDiscovery = new() { Text = "Automatic mDNS discovery (manual IP fallback)", AutoSize = true };
+    readonly CheckBox autoDiscovery = new() { Text = "Automatic detect NodeMCU (manual IP fallback)", AutoSize = true };
     readonly NumericUpDown port = new() { Minimum = 1, Maximum = 65535, Width = 100, Value = 7777 };
     readonly TextBox token = new() { Width = 240, UseSystemPasswordChar = true };
     public Settings? Configuration { get; private set; }
