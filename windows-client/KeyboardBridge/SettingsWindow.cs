@@ -45,7 +45,7 @@ sealed class SettingsWindow : Form
     readonly Label espDiag = new() { AutoSize = true, MaximumSize = new System.Drawing.Size(405, 0) };
     readonly Label benchmarkResult = new() { AutoSize = true, MaximumSize = new System.Drawing.Size(395, 0) };
     readonly TextBox host = new() { Width = 160 };
-    readonly CheckBox autoDiscovery = new() { Text = "Automatic (mDNS) — fallback to IP below", AutoSize = true };
+    readonly CheckBox autoDiscovery = new() { Text = "Automatic detect NodeMCU (manual IP fallback)", AutoSize = true };
     readonly NumericUpDown port = new() { Minimum = 1, Maximum = 65535, Width = 100 };
     readonly TextBox token = new() { Width = 160, UseSystemPasswordChar = true };
     readonly Button mouseHotkey = new() { Text = "Record mouse shortcut", AutoSize = true };
