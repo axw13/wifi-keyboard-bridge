@@ -45,6 +45,7 @@ sealed class SettingsWindow : Form
     readonly Label espDiag = new() { AutoSize = true, MaximumSize = new System.Drawing.Size(405, 0) };
     readonly Label benchmarkResult = new() { AutoSize = true, MaximumSize = new System.Drawing.Size(395, 0) };
     readonly TextBox host = new() { Width = 160 };
+    readonly CheckBox autoDiscovery = new() { Text = "Automatic (mDNS) — fallback to IP below", AutoSize = true };
     readonly NumericUpDown port = new() { Minimum = 1, Maximum = 65535, Width = 100 };
     readonly TextBox token = new() { Width = 160, UseSystemPasswordChar = true };
     readonly Button mouseHotkey = new() { Text = "Record mouse shortcut", AutoSize = true };
@@ -138,9 +139,11 @@ sealed class SettingsWindow : Form
         var panel = connection;
 
         host.Text = cfg.Host;
+        autoDiscovery.Checked = cfg.AutoDiscover;
         port.Value = cfg.Port;
         token.Text = cfg.Token;
         AddRow(panel, 0, "NodeMCU IP / host", host);
+        connection.Controls.Add(autoDiscovery, 1, 10);
         AddRow(panel, 1, "TCP port", port);
         AddRow(panel, 2, "Shared token", token);
         AddRow(connection, 3, "Connection / mode", state);
@@ -170,7 +173,7 @@ sealed class SettingsWindow : Form
             }
             if (MessageBox.Show(this, "Switch to LOCAL, save connection settings and restart Keyboard Bridge?",
                 "Apply connection", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
-            try { applyConnection(new Settings(newHost, (int)port.Value, token.Text)); }
+            try { applyConnection(new Settings(newHost, (int)port.Value, token.Text, autoDiscovery.Checked)); }
             catch (Exception ex) { MessageBox.Show(this, ex.Message, "Unable to save connection settings"); }
         };
         connection.Controls.Add(saveConnection, 1, 8);
