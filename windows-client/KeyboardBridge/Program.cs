@@ -9,7 +9,7 @@ using System.Drawing;
 
 namespace KeyboardBridge;
 
-record Settings(string Host, int Port, string Token);
+record Settings(string Host, int Port, string Token, bool AutoDiscover = false);
 
 static class Program
 {
@@ -707,7 +707,18 @@ sealed class Transport : IDisposable
             try
             {
                 using var socket = new TcpClient { NoDelay = true };
-                await socket.ConnectAsync(cfg.Host, cfg.Port, cts.Token);
+                string target = cfg.Host;
+                if (cfg.AutoDiscover)
+                {
+                    string? discovered = await MdnsDiscovery.ResolveAsync(cts.Token);
+                    if (discovered != null)
+                    {
+                        target = discovered;
+                        DiagnosticLog.Write("mDNS resolved NodeMCU at " + discovered);
+                    }
+                    else DiagnosticLog.Write("mDNS unavailable; trying saved manual host.");
+                }
+                await socket.ConnectAsync(target, cfg.Port, cts.Token);
                 var stream = socket.GetStream();
                 using var writer = new StreamWriter(stream, new UTF8Encoding(false), 1024, leaveOpen: true) { AutoFlush = true };
                 using var reader = new StreamReader(stream, Encoding.ASCII, false, 1024, leaveOpen: true);
