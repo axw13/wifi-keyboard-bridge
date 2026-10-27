@@ -757,7 +757,10 @@ sealed class Transport : IDisposable
         (System.Diagnostics.Stopwatch.GetTimestamp() - stopwatchTimestamp) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
 
     const int PingIntervalMs = 500;
-    const int StallThresholdMs = 250;  // PONG slower than this: hold mouse motion and count a stall
+    const int StallThresholdMs = 250;  // PONG slower than this counts as a link stall
+    // Unacknowledged bytes to the NodeMCU above this mean the PC -> NodeMCU direction is stuck
+    // (normally only a frame or two is in flight). Mouse motion is held only then.
+    const int ForwardBacklogBytes = 200;
     const int DeadLinkMs = 5000;       // no PONG for this long: drop the socket and reconnect
 
     async Task Run()
@@ -897,20 +900,23 @@ sealed class Transport : IDisposable
                         lock (benchmarkLock) benchmarkTimeouts++;
                         benchmarkTimeoutCounted = true;
                     }
-                    // A PONG this late means Wi-Fi is retransmitting; anything written now only
-                    // queues behind it and arrives later as a burst.
-                    bool stalled = pongSeen && outstanding > StallThresholdMs;
                     int targetMs = MouseUpdateMs;
                     long mouseTick = NowMs();
                     if (mouseTick - lastMouseFlush >= targetMs)
                     {
                         RecordSchedulerTick(mouseTick, targetMs);
-                        // While stalled, motion keeps accumulating (bounded) and is sent as one
-                        // report when the link recovers, instead of a burst of stale reports.
-                        if (!stalled) await FlushMouseMovementAsync(writer);
+                        // A late PONG alone may be a stall on the return path only, so motion is held
+                        // just while Windows reports our own frames unacknowledged. Held motion keeps
+                        // accumulating (bounded) and goes out as one report when the link recovers,
+                        // instead of a burst of stale reports.
+                        bool forwardBlocked = UpdateTcpStats(socket.Client, sentAt != 0);
+                        if (!forwardBlocked) await FlushMouseMovementAsync(writer);
+                        else Interlocked.Increment(ref mouseHeldSlots);
                         lastMouseFlush = mouseTick;
                     }
-                    if (!stalled && Environment.TickCount64 - lastKeyboardKeepalive >= 250)
+                    // Keepalives are never suppressed: they keep the NodeMCU watchdog from
+                    // releasing held keys during a stall on the return path.
+                    if (Environment.TickCount64 - lastKeyboardKeepalive >= 250)
                     {
                         await writer.WriteLineAsync(Volatile.Read(ref last)); // Key-hold keepalive
                         lastKeyboardKeepalive = Environment.TickCount64;
@@ -920,6 +926,7 @@ sealed class Transport : IDisposable
                         lastPing = NowMs();
                         benchmarkTimeoutCounted = false;
                         if (BenchmarkRunning) lock (benchmarkLock) benchmarkAttempts++;
+                        lock (linkLock) { retransAtPing = tcpRetrans; timeoutsAtPing = tcpTimeouts; forwardBlockedDuringPing = false; }
                         Interlocked.Exchange(ref pingSentTimestamp, System.Diagnostics.Stopwatch.GetTimestamp());
                         await writer.WriteLineAsync("PING");
                     }
@@ -991,7 +998,12 @@ sealed class Transport : IDisposable
 
     void ResetLinkSummary()
     {
-        lock (linkLock) { summaryPongs = summaryStalls = 0; summaryRttSum = summaryRttMax = summaryLongestStall = 0; }
+        lock (linkLock)
+        {
+            summaryPongs = summaryStalls = 0; summaryRttSum = summaryRttMax = summaryLongestStall = 0;
+            tcpBaselineSet = false; tcpRetrans = tcpTimeouts = retransAtPing = timeoutsAtPing = 0;
+            forwardBlockedDuringPing = false;
+        }
     }
 
     void RecordPong(double ms)
@@ -1002,6 +1014,13 @@ sealed class Transport : IDisposable
             summaryRttSum += ms;
             summaryRttMax = Math.Max(summaryRttMax, ms);
             if (ms < StallThresholdMs) return;
+            // Our frames unacknowledged or retransmitted during this ping: PC -> NodeMCU was stuck.
+            // Otherwise frames were delivered and only the reply (NodeMCU -> PC) was late.
+            bool forward = forwardBlockedDuringPing || tcpRetrans != retransAtPing || tcpTimeouts != timeoutsAtPing;
+            if (forward) forwardStalls++; else returnStalls++;
+            string direction = forward
+                ? $"PC->NodeMCU blocked (retransmitted {tcpRetrans - retransAtPing} bytes, {tcpTimeouts - timeoutsAtPing} RTO)"
+                : "PC->NodeMCU delivered; NodeMCU->PC reply delayed";
             summaryStalls++;
             totalStalls++;
             summaryLongestStall = Math.Max(summaryLongestStall, ms);
@@ -1014,7 +1033,8 @@ sealed class Transport : IDisposable
             lastStallLogTick = now;
             suppressedStallLogs = 0;
             int rssi = Volatile.Read(ref espRssi);
-            DiagnosticLog.Warn($"Link stall: PONG after {ms:F0} ms, RSSI {(rssi == int.MinValue ? "?" : rssi.ToString())} dBm{more}");
+            if (!tcpStatsAvailable) direction = "direction unknown (TCP_INFO unavailable)";
+            DiagnosticLog.Warn($"Link stall: PONG after {ms:F0} ms, {direction}, RSSI {(rssi == int.MinValue ? "?" : rssi.ToString())} dBm{more}");
         }
     }
 
@@ -1029,7 +1049,7 @@ sealed class Transport : IDisposable
             summaryPongs = summaryStalls = 0;
             summaryRttSum = summaryRttMax = summaryLongestStall = 0;
         }
-        DiagnosticLog.Write($"Link summary ({when}): {rtt} | {EspDiagnostics()} | {SchedulerDiagnostics()} | " +
+        DiagnosticLog.Write($"Link summary ({when}): {rtt} | {LinkDiagnostics()} | {EspDiagnostics()} | {SchedulerDiagnostics()} | " +
             $"{MouseDiagnostics()} | {PicoDiagnostics()} | dropped frames {Interlocked.Read(ref droppedFrames)} | disconnections {Reconnects}");
     }
 
@@ -1037,7 +1057,39 @@ sealed class Transport : IDisposable
     {
         if (!Connected) return "Link: disconnected";
         lock (linkLock)
-            return $"Link: stalls >{StallThresholdMs} ms this session {totalStalls} (longest {longestStall:F0} ms) | dropped frames {Interlocked.Read(ref droppedFrames)} | timer {(TimerResolution.Active ? "1 ms" : "default")}";
+            return $"Link: stalls >{StallThresholdMs} ms this session {totalStalls} (longest {longestStall:F0} ms; " +
+                $"{forwardStalls} PC→NodeMCU, {returnStalls} NodeMCU→PC) | mouse held {Interlocked.Read(ref mouseHeldSlots) * MouseUpdateMs / 1000.0:F1} s | " +
+                (tcpStatsAvailable ? $"TCP retransmits {tcpRetrans - sessionRetransBase} B, RTO {tcpTimeouts - sessionTimeoutBase} | " : "TCP stats unavailable | ") +
+                $"dropped frames {Interlocked.Read(ref droppedFrames)} | timer {(TimerResolution.Active ? "1 ms" : "default")}";
+    }
+
+    readonly byte[] tcpInfoBuffer = new byte[128];
+    bool tcpStatsAvailable;
+    uint tcpRetrans, tcpTimeouts, retransAtPing, timeoutsAtPing, sessionRetransBase, sessionTimeoutBase;
+    bool forwardBlockedDuringPing;
+    bool tcpBaselineSet;
+    long forwardStalls, returnStalls, mouseHeldSlots;
+
+    // Returns true while frames sent to the NodeMCU are piling up unacknowledged.
+    bool UpdateTcpStats(Socket socket, bool pingOutstanding)
+    {
+        var stats = TcpStats.Read(socket, tcpInfoBuffer);
+        lock (linkLock)
+        {
+            tcpStatsAvailable = stats is not null;
+            if (stats is not { } s) return false;
+            if (!tcpBaselineSet)
+            {
+                tcpBaselineSet = true;
+                sessionRetransBase = s.BytesRetrans;
+                sessionTimeoutBase = s.TimeoutEpisodes;
+            }
+            tcpRetrans = s.BytesRetrans;
+            tcpTimeouts = s.TimeoutEpisodes;
+            bool blocked = s.BytesInFlight > ForwardBacklogBytes;
+            if (blocked && pingOutstanding) forwardBlockedDuringPing = true;
+            return blocked;
+        }
     }
 
     bool Enqueue(string frame)
