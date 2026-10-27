@@ -26,7 +26,7 @@ unsigned long lastIdleMove = 0;
 bool idleMoveRight = true;
 
 // Diagnostics: reported to Windows by the DIAG command and written to its log.
-const char* FIRMWARE_VERSION = "3.0";
+const char* FIRMWARE_VERSION = "3.1";
 const unsigned long AUTH_TIMEOUT_MS = 2000;  // unauthenticated sockets cannot hold the slot
 const unsigned long IDLE_TIMEOUT_MS = 5000;  // client keepalive is every 250 ms
 unsigned long connectedAt = 0;
@@ -70,7 +70,25 @@ uint8_t txBuf[2 + 512 + 16];
 unsigned long authBlockedUntil = 0;  // grows with consecutive failures so guessing is slow
 uint8_t consecutiveAuthFailures = 0;
 
+// ---------------------------------------------------------------------------------------------
+// USB serial input (docs/protocol.md, "USB serial"). The PC may also write the command lines of the
+// protocol to the board's own USB-UART (GPIO3, the COM port of the NodeMCU). No handshake or encryption:
+// it is a cable between two machines you own. Replies go out on GPIO1 as "#<reply>\n"; the same wire
+// feeds the Pico, which ignores lines that start with '#'. USB input has priority over Wi-Fi input
+// while it is active, so only one source writes to the Pico at a time.
+// ---------------------------------------------------------------------------------------------
+bool usbReply = false;  // the command being handled arrived over USB serial
+char usbLine[96];
+size_t usbLen = 0;
+bool usbSkip = false;  // the current line was too long; discard it up to the newline
+bool usbHeld = false;  // keys or buttons may be held by the USB client
+bool picoProbeUsb = false;
+unsigned long lastUsb = 0, usbFrames = 0, usbBad = 0, usbDropped = 0;
+const unsigned long USB_PRIORITY_MS = 1500;
+
 struct Part { const uint8_t* p; size_t n; };
+
+bool usbRecent() { return lastUsb != 0 && millis() - lastUsb < USB_PRIORITY_MS; }
 
 void hmacSha256(const uint8_t* key, size_t klen, const Part* parts, int n, uint8_t out[32]) {
   br_hmac_key_context kc;
@@ -244,6 +262,12 @@ void tickAntiIdle() {
 
 // Encrypts txBuf[2 .. 2+len) (already filled) and sends it as one frame.
 void sealAndSend(size_t len) {
+  if (usbReply) {
+    Serial.write('#');
+    Serial.write(txBuf + 2, len);
+    Serial.write('\n');
+    return;
+  }
   txBuf[0] = len & 255;
   txBuf[1] = len >> 8;
   aeadSeal(kS2C, CHAN_TCP, ctrTx++, txBuf, 2, txBuf + 2, len, txBuf + 2 + len);
@@ -265,10 +289,12 @@ void readPicoReplies() {
     if (c == '\n') {
       if (picoProbePending && picoLine == String("A,") + picoProbeId) {
         unsigned long us = micros() - picoProbeStart;
-        if (authorized && client.connected()) {
+        if (picoProbeUsb || (authorized && client.connected())) {
           char buf[40];
           snprintf(buf, sizeof(buf), "PICO,%u,%lu", picoProbeId, us);
+          usbReply = picoProbeUsb;
           sendLine(buf);
+          usbReply = false;
         }
         picoProbePending = false;
       }
@@ -294,7 +320,7 @@ void releaseKeys() {
   Serial.flush();
 }
 void resetSession(const char* reason) {
-  releaseKeys();
+  if (!usbRecent()) releaseKeys();  // a Wi-Fi client leaving must not drop keys the USB client holds
   if (client) client.stop();
   lastSessionEnd = reason;
   authorized = false;
@@ -318,6 +344,7 @@ void failAuth(const char* reason) {
   if (client) client.print("ERR\n");  // the only plaintext reply, and it reveals nothing
   resetSession(reason);
 }
+void readUsb();
 void setup() {
   EEPROM.begin(16);
   antiIdleEnabled = EEPROM.read(0) == 0xA5;
@@ -338,7 +365,9 @@ void setup() {
   });
   WiFi.hostname("wifi-keyboard-bridge");
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  while (WiFi.status() != WL_CONNECTED) delay(400);
+  while (WiFi.status() != WL_CONNECTED) {  // USB input works even if Wi-Fi never comes up
+    for (int i = 0; i < 80; i++) { readUsb(); delay(5); }
+  }
   server.begin();
   server.setNoDelay(true);
   udp.begin(UDP_PORT);
@@ -359,10 +388,11 @@ void sendDiag() {
   int n = snprintf(buf, 512,
     "DIAG,fw=%s,sec=3,up=%lu,rssi=%d,ch=%d,phy=%d,heap=%u,frag=%u,sessions=%lu,authfail=%lu,authtimeout=%lu,"
     "idletimeout=%lu,rxgap=%lu,wdrelease=%lu,badframe=%lu,overflow=%lu,badtag=%lu,picotimeout=%lu,wifidrop=%lu,"
-    "wifireason=%d,udp=%lu,udplost=%lu,udpstale=%lu,udpbad=%lu,lastend=%s,pico=%s,reset=%s",
+    "wifireason=%d,udp=%lu,udplost=%lu,udpstale=%lu,udpbad=%lu,usb=%lu,usbbad=%lu,usbdrop=%lu,lastend=%s,pico=%s,reset=%s",
     FIRMWARE_VERSION, millis() / 1000, WiFi.RSSI(), WiFi.channel(), (int)WiFi.getPhyMode(), (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getHeapFragmentation(),
     sessions, authFailures, authTimeouts, idleTimeouts, maxRxGap, watchdogReleases, invalidFrames, lineOverflows, badTags,
     picoProbeTimeouts, wifiDisconnects, lastWifiDisconnectReason, udpPackets, udpLost, udpStale, udpBad,
+    usbFrames, usbBad, usbDropped,
     lastSessionEnd, picoCounters, reset);
   if (n >= 512) n = 511;
   sealAndSend(n);
@@ -374,6 +404,7 @@ uint32_t readLe32(const uint8_t* p) { return (uint32_t)p[0] | ((uint32_t)p[1] <<
 
 void forwardUdpState(const uint8_t* d) {
   // d: mods, keys[6], buttons, x(2), y(2), wheel(2)
+  if (usbRecent()) { usbDropped++; return; }  // USB has priority; one writer to the Pico
   unsigned long now = millis();
   // Resend the keyboard state only on change or as the Pico's keepalive, not for every mouse packet.
   if (!udpKeysSent || memcmp(udpKeys, d, 7) != 0 || now - udpLastKeysForward >= 250) {
@@ -452,6 +483,12 @@ bool handleLine(const String& cmd) {
     sendStat();
   } else if (cmd == "DIAG") {
     sendDiag();
+  } else if (cmd == "USB?") {
+    char buf[24];
+    snprintf(buf, sizeof(buf), "USB,%s", FIRMWARE_VERSION);
+    sendLine(buf);
+  } else if (usbReply && (cmd == "UDP?" || cmd == "UACK?")) {
+    // The UDP fast path belongs to the Wi-Fi session.
   } else if (cmd == "UDP?") {
     // Offer the UDP fast path; datagrams are authenticated by the session keys, not by an id.
     udpActive = true;
@@ -484,6 +521,7 @@ bool handleLine(const String& cmd) {
     unsigned long id = cmd.substring(6).toInt();
     if (cmd.length() <= 11 && id <= 65535 && cmd == String("PICO?,") + id && !picoProbePending) {
       picoProbeId = (unsigned int)id;
+      picoProbeUsb = usbReply;
       Serial.print("D,");
       Serial.println(picoProbeId);
       picoProbeStart = micros();
@@ -505,7 +543,10 @@ bool handleLine(const String& cmd) {
     bool valid = true;
     for (unsigned int i = 0; i < cmd.length(); i++)
       if (!(cmd[i] == ',' || (cmd[i] >= '0' && cmd[i] <= '9') || (cmd[0] == 'M' && cmd[i] == '-') || (i == 0 && (cmd[i] == 'S' || cmd[i] == 'M')))) valid = false;
-    if (valid) {
+    if (valid && !usbReply && usbRecent()) {
+      usbDropped++;  // USB input has priority over Wi-Fi while it is active
+    } else if (valid) {
+      if (usbReply) { lastUsb = millis(); usbHeld = true; }
       Serial.println(cmd);
       serialFrames++;
       serialBytes += cmd.length() + 2;
@@ -561,9 +602,39 @@ void discardUnexpectedUdp() {
   for (int budget = 8; budget > 0 && udp.parsePacket() > 0; budget--) udpBad++;
 }
 
+// Command lines written by the PC to the board's USB-UART. A line is handled exactly like one from Wi-Fi.
+void readUsb() {
+  int budget = 160;
+  while (budget-- > 0 && Serial.available()) {
+    int c = Serial.read();
+    if (c == '\r') continue;
+    if (c == '\n') {
+      if (!usbSkip && usbLen > 0) {
+        usbLine[usbLen] = 0;
+        usbFrames++;
+        usbReply = true;
+        String cmd(usbLine);
+        cmd.trim();
+        handleLine(cmd);
+        usbReply = false;
+      }
+      usbLen = 0;
+      usbSkip = false;
+    } else if (usbLen < sizeof(usbLine) - 1) usbLine[usbLen++] = (char)c;
+    else { usbSkip = true; usbBad++; }
+  }
+  if (usbHeld && !usbRecent()) {
+    // The USB client went away or stalled: release everything once.
+    usbHeld = false;
+    watchdogReleases++;
+    releaseKeys();
+  }
+}
+
 void loop() {
   MDNS.update();
   readPicoReplies();
+  readUsb();
   tickAntiIdle();
   if (!(authorized && udpActive)) discardUnexpectedUdp();
   if (!client || !client.connected()) {

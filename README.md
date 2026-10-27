@@ -100,6 +100,7 @@ See [first-run and optional Pico USB storage settings](docs/first-run-and-pico-u
 
 ## Limitations and safety
 
+- If the PC and the target are next to each other, set the client's link to USB serial (Settings > Connection) to use the NodeMCU's USB cable instead of Wi-Fi: no radio stalls and about 3 ms round trip. See `docs/protocol.md`.
 - Traffic between the PC and the NodeMCU is authenticated and encrypted (protocol v3):
   the token is never sent, both sides prove they know it, and input is
   ChaCha20-Poly1305 encrypted. Keep the token secret and random (16+ characters)

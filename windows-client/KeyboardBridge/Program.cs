@@ -10,7 +10,9 @@ using System.Drawing;
 namespace KeyboardBridge;
 
 // UseUdp: send input over the UDP fast path when the NodeMCU offers it (firmware 2.4+); TCP stays the fallback.
-record Settings(string Host, int Port, string Token, bool AutoDiscover = false, bool UseUdp = true);
+// Link: "wifi" (default), "usb" (the NodeMCU's USB serial port, firmware 3.1+) or "auto" (USB when the port answers, else Wi-Fi).
+// UsbPort: a COM port name such as "COM5", or "auto" to find the NodeMCU.
+record Settings(string Host, int Port, string Token, bool AutoDiscover = false, bool UseUdp = true, string Link = "wifi", string UsbPort = "auto");
 
 static class Program
 {
@@ -732,7 +734,7 @@ sealed class Transport : IDisposable
     }
     // Emit at most one HID movement report per interval. Bursting several
     // reports at once makes pointer motion appear to jump even when RTT is low.
-    async Task FlushMouseMovementAsync(SecureLink writer, bool viaUdp)
+    async Task FlushMouseMovementAsync(ILineLink writer, bool viaUdp)
     {
         int dx, dy, buttons;
         lock (motionLock)
@@ -822,6 +824,27 @@ sealed class Transport : IDisposable
         catch { socket.Dispose(); throw; }
     }
 
+    // The USB serial link when the settings ask for it. "auto" falls back to Wi-Fi when no NodeMCU answers.
+    async Task<UsbLink?> TryUsbAsync()
+    {
+        string mode = (cfg.Link ?? "wifi").ToLowerInvariant();
+        if (mode != "usb" && mode != "auto") return null;
+        if (UsbLink.AvailablePorts().Length == 0)
+        {
+            if (mode == "usb") throw new IOException("No serial ports found (is the NodeMCU plugged in by USB?)");
+            return null;
+        }
+        try { return await UsbLink.ConnectAsync(cfg.UsbPort ?? "auto", cts.Token); }
+        catch (Exception ex) when (mode == "auto" && !cts.IsCancellationRequested)
+        {
+            if (!usbFallbackLogged) DiagnosticLog.Warn("USB serial unavailable, using Wi-Fi: " + ex.Message);
+            usbFallbackLogged = true;
+            return null;
+        }
+    }
+    bool usbFallbackLogged;
+    volatile bool usbActive;
+
     async Task Run()
     {
         while (!cts.IsCancellationRequested)
@@ -833,6 +856,25 @@ sealed class Transport : IDisposable
                 string target = Volatile.Read(ref fallbackHost);
                 string source = "saved host";
                 var connectWatch = System.Diagnostics.Stopwatch.StartNew();
+                ILineLink writer;
+                TcpClient? socket = null;
+                bool usb = false;
+                long connectMs;
+                var usbLink = await TryUsbAsync();
+                if (usbLink is not null)
+                {
+                    usb = true;
+                    usbFallbackLogged = false;
+                    writer = usbLink;
+                    target = usbLink.PortName;
+                    source = "USB serial";
+                    connectMs = connectWatch.ElapsedMilliseconds;
+                    sessionKeys = null;
+                    Volatile.Write(ref activeHost, target);
+                    DiagnosticLog.Write($"Connected to NodeMCU firmware {usbLink.Firmware} on {target} via USB serial in {connectMs} ms.");
+                }
+                else
+                {
                 // Try the last authenticated address first; mDNS costs 1.5-3 s per reconnect.
                 TcpClient? attempt = cfg.AutoDiscover ? await TryConnectAsync(target, cfg.Port, 1000) : null;
                 if (attempt is null && cfg.AutoDiscover)
@@ -852,12 +894,14 @@ sealed class Transport : IDisposable
                     try { await attempt.ConnectAsync(target, cfg.Port, cts.Token); }
                     catch { attempt.Dispose(); throw; }
                 }
-                using var socket = attempt;
-                long connectMs = connectWatch.ElapsedMilliseconds;
+                socket = attempt;
+                connectMs = connectWatch.ElapsedMilliseconds;
                 // Mutual challenge-response, then every byte is encrypted and authenticated (SecureChannel.cs).
-                using var writer = await SecureLink.ConnectAsync(socket.GetStream(), cfg.Token, cts.Token);
-                var reader = writer;
-                sessionKeys = writer.Keys;
+                SecureLink secure;
+                try { secure = await SecureLink.ConnectAsync(socket.GetStream(), cfg.Token, cts.Token); }
+                catch { socket.Dispose(); throw; }
+                writer = secure;
+                sessionKeys = secure.Keys;
                 DiagnosticLog.Write($"Connected to {target}:{cfg.Port} via {source}; TCP connect {connectMs} ms, authenticated {connectWatch.ElapsedMilliseconds} ms.");
                 // Only trust and store a discovered address after shared-token authentication.
                 Volatile.Write(ref activeHost, target);
@@ -867,6 +911,12 @@ sealed class Transport : IDisposable
                     try { ConfigStore.Save(cfg with { Host = target }); }
                     catch (Exception ex) { DiagnosticLog.Write("Unable to save discovered NodeMCU IP: " + ex.GetType().Name); }
                 }
+                }
+                using var ownedSocket = socket;
+                using var ownedWriter = writer;
+                var reader = writer;
+                usbActive = usb;
+                bool useUdp = cfg.UseUdp && !usb;  // UDP is the Wi-Fi fast path; a cable needs none
                 timerRaised = TimerResolution.Begin();
                 connected = true;
                 pongSeen = false;
@@ -907,7 +957,7 @@ sealed class Transport : IDisposable
                         else if (response.StartsWith("UDP,"))
                         {
                             var fields = response.Split(',');
-                            if (cfg.UseUdp && !udpReady && fields.Length == 2 && int.TryParse(fields[1], out int udpPort) &&
+                            if (useUdp && !udpReady && fields.Length == 2 && int.TryParse(fields[1], out int udpPort) &&
                                 udpPort is >= 1 and <= 65535)
                                 StartUdp(target, udpPort);
                         }
@@ -959,7 +1009,7 @@ sealed class Transport : IDisposable
                 lock (timingLock) picoHistory.Clear();
                 await writer.WriteLineAsync("DIAG");
                 await writer.WriteLineAsync("GAP?");  // starts the NodeMCU's gap window for this session
-                if (cfg.UseUdp) await writer.WriteLineAsync("UDP?");  // answered only by firmware 2.4+
+                if (useUdp) await writer.WriteLineAsync("UDP?");  // answered only by firmware 2.4+
                 long udpCheckSent = 0, udpCheckRx = -1, udpCheckReplies = 0;
                 int udpSilentChecks = 0;
                 while (!cts.IsCancellationRequested)
@@ -997,7 +1047,7 @@ sealed class Transport : IDisposable
                         // just while Windows reports our own frames unacknowledged. Held motion keeps
                         // accumulating (bounded) and goes out as one report when the link recovers,
                         // instead of a burst of stale reports.
-                        bool forwardBlocked = UpdateTcpStats(socket.Client, sentAt != 0);
+                        bool forwardBlocked = socket is not null && UpdateTcpStats(socket.Client, sentAt != 0);
                         if (udpReady) await FlushMouseMovementAsync(writer, true);  // UDP is never blocked by a TCP backlog
                         else if (!forwardBlocked) await FlushMouseMovementAsync(writer, false);
                         else Interlocked.Increment(ref mouseHeldSlots);
@@ -1225,7 +1275,7 @@ sealed class Transport : IDisposable
 
     public string UdpDiagnostics()
     {
-        if (!udpReady) return cfg.UseUdp ? "UDP: off (TCP)" : "UDP: disabled";
+        if (!udpReady) return usbActive ? "USB serial" : cfg.UseUdp ? "UDP: off (TCP)" : "UDP: disabled";
         long pings = Interlocked.Read(ref udpPingsSent), echoes = Interlocked.Read(ref udpEchoes);
         string rtt;
         lock (timingLock) rtt = TimingSummary(udpRttHistory);

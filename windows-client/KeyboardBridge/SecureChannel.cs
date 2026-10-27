@@ -88,7 +88,7 @@ public sealed class Aead : IDisposable
 
 // Authenticated, encrypted line transport over a stream. Lines are the same commands as before
 // ("S,...", "PING", ...); the framing hides them and makes replay, reordering and tampering fatal.
-public sealed class SecureLink : IDisposable
+public sealed class SecureLink : ILineLink
 {
     public const int MaxFramePlaintext = 1024;
     readonly Stream stream;
@@ -187,6 +187,8 @@ public sealed class SecureLink : IDisposable
         rxCounter++;
         return Encoding.UTF8.GetString(plaintext).TrimEnd('\r', '\n');
     }
+
+    Task<string?> ILineLink.ReadLineAsync(CancellationToken ct) => ReadLineAsync(ct);
 
     public async Task WriteLineAsync(string line)
     {

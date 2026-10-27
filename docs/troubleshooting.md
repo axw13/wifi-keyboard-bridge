@@ -16,6 +16,7 @@ logged.
 | --- | --- |
 | `Application starting` / `Configuration:` | Version, Windows build, host/port/mDNS setting |
 | `Connected to … TCP connect X ms, authenticated Y ms` | Each successful session |
+| `USB serial unavailable, using Wi-Fi: …` | No NodeMCU answered on a COM port: flash firmware 3.1 or newer, close the Arduino serial monitor, check the cable, and update `firmware/pico/code.py` |
 | `Connect attempt failed: …` | Host unreachable, auth timeout, `wrong token or an impostor`, `firmware 3.0 or newer`, or `token mismatch?` |
 | `Connection ended after hh:mm:ss: …` | Why the session ended, followed by a link summary |
 | `No PONG for N ms; link presumed dead` | NodeMCU stopped answering for 10 s; the client reconnects instead of silently swallowing input |
