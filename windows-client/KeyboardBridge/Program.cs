@@ -19,8 +19,26 @@ static class Program
         using var oneInstance = new Mutex(true, @"Local\WifiKeyboardBridge_axw13", out bool firstInstance);
         if (!firstInstance) { MessageBox.Show("Wi-Fi Keyboard Bridge is already running. Check the system tray.", "Already running"); return; }
         ApplicationConfiguration.Initialize();
-        DiagnosticLog.Write("Application starting.");
+        Application.ThreadException += (_, e) =>
+        {
+            DiagnosticLog.Error("Unhandled UI exception: " + e.Exception);
+            MessageBox.Show(e.Exception.Message, "Wi-Fi Keyboard Bridge error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        };
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+        {
+            DiagnosticLog.Error("Fatal unhandled exception: " + e.ExceptionObject);
+            DiagnosticLog.Flush();
+        };
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            DiagnosticLog.Warn("Unobserved task exception: " + e.Exception.GetBaseException());
+            e.SetObserved();
+        };
+        DiagnosticLog.Write($"Application starting. Version {Application.ProductVersion}, " +
+            $"{System.Runtime.InteropServices.RuntimeInformation.OSDescription}, .NET {Environment.Version}.");
         var cfg = ConfigStore.Load();
+        if (cfg is not null)
+            DiagnosticLog.Write($"Configuration: host {cfg.Host}, port {cfg.Port}, automatic detection {(cfg.AutoDiscover ? "on" : "off")} ({ConfigStore.Path}).");
         if (cfg is null)
         {
             using var setup = new FirstRunDialog();
@@ -91,7 +109,8 @@ sealed class BridgeContext : ApplicationContext
         var menu = new ContextMenuStrip();
         menu.Items.Add("Switch keyboard", null, (_, _) => Toggle());
         menu.Items.Add("Switch mouse", null, (_, _) => ToggleMouse());
-        menu.Items.Add("Emergency LOCAL (Ctrl+Alt+F10)", null, (_, _) => EmergencyLocal());
+        menu.Items.Add("Emergency LOCAL (Ctrl+Alt+F10)", null, (_, _) => EmergencyLocal("tray menu"));
+        menu.Items.Add("Open log folder", null, (_, _) => OpenLogFolder());
         menu.Items.Add("Settings && Connection Statistics...", null, (_, _) => ShowSettings(cfg));
         menu.Items.Add("Exit", null, (_, _) => ExitThread());
         tray.ContextMenuStrip = menu;
@@ -100,7 +119,14 @@ sealed class BridgeContext : ApplicationContext
         mouseHook = new MouseHook(HandleMouse);
         rawMouse = new RawMouseInput(() => mouseRemote && network.Connected,
             (dx, dy) => network.SendMouseMovement(dx, dy));
+        Microsoft.Win32.SystemEvents.PowerModeChanged += OnPowerModeChanged;
+        System.Net.NetworkInformation.NetworkChange.NetworkAvailabilityChanged += OnNetworkAvailabilityChanged;
     }
+
+    static void OnPowerModeChanged(object? sender, Microsoft.Win32.PowerModeChangedEventArgs e) =>
+        DiagnosticLog.Write("Windows power event: " + e.Mode);
+    static void OnNetworkAvailabilityChanged(object? sender, System.Net.NetworkInformation.NetworkAvailabilityEventArgs e) =>
+        DiagnosticLog.Warn("Windows network availability changed: " + (e.IsAvailable ? "available" : "unavailable"));
 
     bool HandleKey(int vk, bool pressed, bool injected)
     {
@@ -115,7 +141,7 @@ sealed class BridgeContext : ApplicationContext
         if (settingsWindow?.IsRecording == true) return settingsWindow.TryRecord(vk, pressed, mods);
         if (pressed && ((vk == emergencyVk && mods == emergencyMods) || (vk == 0x79 && mods == 3)))
         {
-            if (!emergencyHotkeyLatch) { emergencyHotkeyLatch = true; EmergencyLocal(); }
+            if (!emergencyHotkeyLatch) { emergencyHotkeyLatch = true; EmergencyLocal("emergency shortcut"); }
             swallowed.Add(vk);
             return true;
         }
@@ -148,7 +174,7 @@ sealed class BridgeContext : ApplicationContext
                 // Defer the mode change until this final typed key is handled
                 // in its original mode; do not redirect it mid-keydown.
                 ui.Post(_ => {
-                    if (remote || mouseRemote) EmergencyLocal();
+                    if (remote || mouseRemote) EmergencyLocal("switch sequence");
                     else if (network.Connected) { Toggle(); ToggleMouseTo(true); }
                 }, null);
             }
@@ -160,9 +186,9 @@ sealed class BridgeContext : ApplicationContext
         // The host PC's LED is not feedback from the remote PC, so lock states can diverge.
         if (remote && (vk == 0x90 || vk == 0x91 || vk == 0x14))
         {
-            if (!network.Connected) { EmergencyLocal(); return false; }
+            if (!network.Connected) { EmergencyLocal("lock key while disconnected"); return false; }
             if (pressed) held.Add(vk); else held.Remove(vk);
-            if (!SendState()) EmergencyLocal();
+            if (!SendState()) EmergencyLocal("send queue full");
             return false;
         }
         // Preserve key-up ownership across LOCAL -> REMOTE transitions.
@@ -176,17 +202,18 @@ sealed class BridgeContext : ApplicationContext
         }
         // Auto-repeated key-downs that started in LOCAL must not migrate to REMOTE.
         if (localDown.Contains(vk)) return false;
-        if (!network.Connected) { EmergencyLocal(); return false; }
+        if (!network.Connected) { EmergencyLocal("key while disconnected"); return false; }
         int usage = HidMap.Key(vk);
         if (usage == 0) return false; // Don't suppress unsupported keys
         if (pressed) { held.Add(vk); swallowed.Add(vk); }
         else held.Remove(vk);
-        if (!SendState()) { SwitchLocal(); return false; }
+        if (!SendState()) { DiagnosticLog.Warn("Key frame could not be queued; switching keyboard LOCAL."); SwitchLocal(); return false; }
         return true;
     }
 
-    void EmergencyLocal()
+    void EmergencyLocal(string reason)
     {
+        if (remote || mouseRemote) DiagnosticLog.Warn("Emergency LOCAL: " + reason);
         SwitchLocal();
         ToggleMouseTo(false);
         // Explicitly release remote HID state even if input-mode flags were already LOCAL.
@@ -197,13 +224,14 @@ sealed class BridgeContext : ApplicationContext
     bool HandleMouse(int message, int x, int y, int wheel)
     {
         if (!mouseRemote) return false;
-        if (!network.Connected) { EmergencyLocal(); return false; }
+        if (!network.Connected) { EmergencyLocal("mouse while disconnected"); return false; }
         return mouseHook.Forward(message, x, y, wheel, (b, dx, dy, w) => network.SendMouse(b, dx, dy, w));
     }
     void ToggleMouse() => ToggleMouseTo(!mouseRemote);
     void ToggleMouseTo(bool enabled)
     {
         if (enabled && !network.Connected) return;
+        if (mouseRemote != enabled) DiagnosticLog.Write("Mouse " + (enabled ? "REMOTE" : "LOCAL"));
         mouseRemote = enabled;
         mouseHook.ResetTracking();
         if (!enabled)
@@ -243,6 +271,7 @@ sealed class BridgeContext : ApplicationContext
         if (!network.Connected) { MessageBox.Show("NodeMCU not connected. Check IP, Wi-Fi and token."); return; }
         held.Clear();
         remote = true;
+        DiagnosticLog.Write("Keyboard REMOTE");
         UpdateTray();
         SendState();
     }
@@ -250,6 +279,7 @@ sealed class BridgeContext : ApplicationContext
     {
         if (!remote) return;
         remote = false;
+        DiagnosticLog.Write("Keyboard LOCAL");
         held.Clear();
         network.Send(0, Array.Empty<int>());
         UpdateTray();
@@ -266,7 +296,8 @@ sealed class BridgeContext : ApplicationContext
             UserPreferences.Save(prefPath, new UserPreferences(toggleVk, mouseToggleVk, linkedToggle, mouseSensitivity, network.ManualMouseInterval, network.AdaptiveMouse, antiIdle.Enabled, keyboardMods, mouseMods, emergencyVk, emergencyMods, switchSequence));
         }, newSettings =>
         {
-            EmergencyLocal();
+            EmergencyLocal("connection settings changed");
+            DiagnosticLog.Write("Connection settings changed; restarting.");
             ConfigStore.Save(newSettings);
             Application.Restart();
         });
@@ -329,9 +360,21 @@ sealed class BridgeContext : ApplicationContext
             network.ManualMouseInterval, network.AdaptiveMouse, antiIdle.Enabled,
             keyboardMods, mouseMods, emergencyVk, emergencyMods, switchSequence));
 
+    static void OpenLogFolder()
+    {
+        try
+        {
+            Directory.CreateDirectory(DiagnosticLog.LogDirectory);
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(DiagnosticLog.LogDirectory) { UseShellExecute = true });
+        }
+        catch (Exception ex) { MessageBox.Show(ex.Message, "Unable to open log folder"); }
+    }
+
     protected override void ExitThreadCore()
     {
-        EmergencyLocal();
+        EmergencyLocal("application exit");
+        Microsoft.Win32.SystemEvents.PowerModeChanged -= OnPowerModeChanged;
+        System.Net.NetworkInformation.NetworkChange.NetworkAvailabilityChanged -= OnNetworkAvailabilityChanged;
         trayTimer.Stop();
         trayTimer.Dispose();
         DiagnosticLog.Write("Application exiting.");
@@ -345,6 +388,7 @@ sealed class BridgeContext : ApplicationContext
         disconnectedIcon.Dispose();
         localIcon.Dispose();
         remoteIcon.Dispose();
+        DiagnosticLog.Flush();
         base.ExitThreadCore();
     }
 }
@@ -433,6 +477,7 @@ sealed class Transport : IDisposable
     readonly Action disconnected;
     readonly BlockingCollection<string> queue = new(256);
     readonly CancellationTokenSource cts = new();
+    readonly SemaphoreSlim wake = new(0);
     volatile bool connected;
     long sentReports;
     readonly object motionLock = new();
@@ -613,9 +658,9 @@ sealed class Transport : IDisposable
     public void UpdateAntiIdleState(bool enabled, bool paused)
     {
         if (!Connected) { idleEnabledSent = null; idlePausedSent = null; return; }
-        if (idleEnabledSent != enabled && queue.TryAdd(enabled ? "IDLE,ON" : "IDLE,OFF"))
+        if (idleEnabledSent != enabled && Enqueue(enabled ? "IDLE,ON" : "IDLE,OFF"))
             idleEnabledSent = enabled;
-        if (idlePausedSent != paused && queue.TryAdd(paused ? "IDLE,PAUSE" : "IDLE,RESUME"))
+        if (idlePausedSent != paused && Enqueue(paused ? "IDLE,PAUSE" : "IDLE,RESUME"))
             idlePausedSent = paused;
     }
 
@@ -651,7 +696,7 @@ sealed class Transport : IDisposable
             // Button presses/releases and wheel remain immediate and reliable.
             if (wheel != 0) pendingWheel = Math.Clamp(pendingWheel + wheel, -127, 127);
             var packet = $"M,{buttons},0,0,{Math.Clamp(pendingWheel,-127,127)}";
-            if (!queue.TryAdd(packet)) return false;
+            if (!Enqueue(packet)) return false;
             pendingWheel = 0;
             return true;
         }
@@ -673,7 +718,7 @@ sealed class Transport : IDisposable
         {
             await writer.WriteLineAsync($"M,{buttons},{dx},{dy},0");
             Interlocked.Increment(ref mouseReports);
-            long now = Environment.TickCount64;
+            long now = NowMs();
             long previous = Interlocked.Exchange(ref mouseLastSentTick, now);
             if (previous != 0 && now - previous <= 100)
             {
@@ -703,33 +748,53 @@ sealed class Transport : IDisposable
         for (int i = 0; i < Math.Min(6, keys.Count); i++) six[i] = keys[i];
         string frame = "S," + mods + "," + string.Join(",", six);
         Volatile.Write(ref last, frame);
-        return queue.TryAdd(frame);
+        return Enqueue(frame);
     }
+    // Stopwatch-based milliseconds. Environment.TickCount64 only advances in ~15.6 ms
+    // steps on Windows, which quantised mouse pacing to 16/32 ms regardless of the setting.
+    static long NowMs() => System.Diagnostics.Stopwatch.GetTimestamp() * 1000 / System.Diagnostics.Stopwatch.Frequency;
+    static double ElapsedMs(long stopwatchTimestamp) =>
+        (System.Diagnostics.Stopwatch.GetTimestamp() - stopwatchTimestamp) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+
+    const int PingIntervalMs = 500;
+    const int StallThresholdMs = 250;  // PONG slower than this: hold mouse motion and count a stall
+    const int DeadLinkMs = 5000;       // no PONG for this long: drop the socket and reconnect
+
     async Task Run()
     {
         while (!cts.IsCancellationRequested)
         {
+            bool timerRaised = false;
+            string reason = "cancelled";
             try
             {
                 using var socket = new TcpClient { NoDelay = true };
                 string target = Volatile.Read(ref fallbackHost);
+                string source = "manual host";
                 if (cfg.AutoDiscover)
                 {
                     string? discovered = await MdnsDiscovery.ResolveAsync(cts.Token);
                     if (discovered != null)
                     {
                         target = discovered;
+                        source = "mDNS";
                         DiagnosticLog.Write("mDNS resolved NodeMCU at " + discovered);
                     }
-                    else DiagnosticLog.Write("mDNS unavailable; trying saved manual host.");
+                    else DiagnosticLog.Warn("mDNS unavailable; trying saved manual host " + target);
                 }
+                var connectWatch = System.Diagnostics.Stopwatch.StartNew();
                 await socket.ConnectAsync(target, cfg.Port, cts.Token);
+                long connectMs = connectWatch.ElapsedMilliseconds;
                 var stream = socket.GetStream();
                 using var writer = new StreamWriter(stream, new UTF8Encoding(false), 1024, leaveOpen: true) { AutoFlush = true };
                 using var reader = new StreamReader(stream, Encoding.ASCII, false, 1024, leaveOpen: true);
                 await writer.WriteLineAsync("AUTH " + cfg.Token);
-                if (await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(3), cts.Token) != "OK")
-                    throw new IOException("Authentication failed");
+                string? authReply;
+                try { authReply = await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(3), cts.Token); }
+                catch (TimeoutException) { throw new IOException("Authentication timed out (no reply within 3 s)"); }
+                if (authReply == "ERR") throw new IOException("Authentication rejected by NodeMCU (token mismatch?)");
+                if (authReply != "OK") throw new IOException("Authentication failed (reply: " + (authReply ?? "connection closed") + ")");
+                DiagnosticLog.Write($"Connected to {target}:{cfg.Port} via {source}; TCP connect {connectMs} ms, authenticated {connectWatch.ElapsedMilliseconds} ms.");
                 // Only trust and store a discovered address after shared-token authentication.
                 Volatile.Write(ref activeHost, target);
                 if (cfg.AutoDiscover && target != Volatile.Read(ref fallbackHost))
@@ -738,16 +803,19 @@ sealed class Transport : IDisposable
                     try { ConfigStore.Save(cfg with { Host = target }); }
                     catch (Exception ex) { DiagnosticLog.Write("Unable to save discovered NodeMCU IP: " + ex.GetType().Name); }
                 }
+                timerRaised = TimerResolution.Begin();
                 connected = true;
+                pongSeen = false;
                 Volatile.Write(ref espRssi, int.MinValue);
                 connectedSince = DateTimeOffset.UtcNow;
                 Interlocked.Exchange(ref latencyTenths, -1);
+                ResetLinkSummary();
                 var readReplies = Task.Run(async () =>
                 {
                     while (!cts.IsCancellationRequested)
                     {
                         var response = await reader.ReadLineAsync(cts.Token);
-                        if (response == null) throw new IOException("Connection closed");
+                        if (response == null) throw new IOException("Connection closed by NodeMCU");
                         if (response.StartsWith("PICO,"))
                         {
                             var parts = response.Split(',');
@@ -772,57 +840,85 @@ sealed class Transport : IDisposable
                                 Interlocked.Exchange(ref espBytes, bytes);
                             }
                         }
+                        else if (response.StartsWith("DIAG,"))
+                        {
+                            Volatile.Write(ref firmwareDiag, response[5..]);
+                            DiagnosticLog.Write("Firmware: " + response[5..]);
+                        }
                         else if (response == "PONG")
                         {
                             var t = Interlocked.Exchange(ref pingSentTimestamp, 0);
                             if (t != 0)
                             {
-                                var ms = (System.Diagnostics.Stopwatch.GetTimestamp() - t) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                                pongSeen = true;
+                                var ms = ElapsedMs(t);
                                 Interlocked.Exchange(ref latencyTenths, (long)Math.Round(ms * 10));
                                 lock (timingLock) AddTiming(rttHistory, ms);
                                 if (BenchmarkRunning) lock (benchmarkLock) benchmarkSamples.Add(ms);
+                                RecordPong(ms);
                             }
                         }
                     }
                 }, cts.Token);
-                var lastPing = DateTimeOffset.MinValue;
-                lastMouseFlush = Environment.TickCount64;
+                long lastPing = 0;
+                lastMouseFlush = NowMs();
                 lock (timingLock) { schedulerIntervals.Clear(); schedulerLateness.Clear(); activeReportIntervals.Clear(); rttHistory.Clear(); }
                 long lastKeyboardKeepalive = Environment.TickCount64;
                 long lastTelemetryRequest = Environment.TickCount64;
                 long lastPicoProbe = Environment.TickCount64;
+                long lastSummary = Environment.TickCount64;
+                bool benchmarkTimeoutCounted = false;
                 Interlocked.Exchange(ref picoLastAckTick, lastPicoProbe);
                 lock (timingLock) picoHistory.Clear();
+                await writer.WriteLineAsync("DIAG");
                 while (!cts.IsCancellationRequested)
                 {
-                    if (readReplies.IsFaulted || readReplies.IsCompleted) throw new IOException("Ping response reader stopped");
-                    if (queue.TryTake(out var frame))
+                    if (readReplies.IsFaulted || readReplies.IsCompleted)
+                        throw readReplies.Exception?.GetBaseException() ?? new IOException("Reply reader stopped");
+                    // Send every queued key/button frame now; one frame per pass made typing queue up.
+                    while (queue.TryTake(out var frame))
                     {
                         await writer.WriteLineAsync(frame);
                         Interlocked.Increment(ref sentReports);
                     }
-                    // Avoid flooding the UART with keyboard keepalives while processing mouse movement.
+                    long sentAt = Interlocked.Read(ref pingSentTimestamp);
+                    double outstanding = sentAt != 0 ? ElapsedMs(sentAt) : 0;
+                    if (pongSeen && outstanding > DeadLinkMs)
+                        throw new IOException($"No PONG for {outstanding:F0} ms; link presumed dead");
+                    if (!pongSeen && outstanding > 3000)
+                    {
+                        // Firmware without PING support: keep running without RTT and stall detection.
+                        Interlocked.Exchange(ref pingSentTimestamp, 0);
+                        Interlocked.Exchange(ref latencyTenths, -1);
+                        sentAt = 0;
+                    }
+                    if (BenchmarkRunning && outstanding > 1000 && !benchmarkTimeoutCounted)
+                    {
+                        lock (benchmarkLock) benchmarkTimeouts++;
+                        benchmarkTimeoutCounted = true;
+                    }
+                    // A PONG this late means Wi-Fi is retransmitting; anything written now only
+                    // queues behind it and arrives later as a burst.
+                    bool stalled = pongSeen && outstanding > StallThresholdMs;
                     int targetMs = MouseUpdateMs;
-                    long mouseTick = Environment.TickCount64;
+                    long mouseTick = NowMs();
                     if (mouseTick - lastMouseFlush >= targetMs)
                     {
                         RecordSchedulerTick(mouseTick, targetMs);
-                        await FlushMouseMovementAsync(writer);
+                        // While stalled, motion keeps accumulating (bounded) and is sent as one
+                        // report when the link recovers, instead of a burst of stale reports.
+                        if (!stalled) await FlushMouseMovementAsync(writer);
                         lastMouseFlush = mouseTick;
                     }
-                    if (Environment.TickCount64 - lastKeyboardKeepalive >= 250)
+                    if (!stalled && Environment.TickCount64 - lastKeyboardKeepalive >= 250)
                     {
                         await writer.WriteLineAsync(Volatile.Read(ref last)); // Key-hold keepalive
                         lastKeyboardKeepalive = Environment.TickCount64;
                     }
-                    if (DateTimeOffset.UtcNow - lastPing > (BenchmarkRunning ? TimeSpan.FromMilliseconds(150) : TimeSpan.FromSeconds(2)))
+                    if (sentAt == 0 && NowMs() - lastPing >= (BenchmarkRunning ? 150 : PingIntervalMs))
                     {
-                        lastPing = DateTimeOffset.UtcNow;
-                        if (Interlocked.Read(ref pingSentTimestamp) != 0)
-                        {
-                            Interlocked.Exchange(ref latencyTenths, -1); // timed-out / unsupported firmware
-                            if (BenchmarkRunning) lock (benchmarkLock) benchmarkTimeouts++;
-                        }
+                        lastPing = NowMs();
+                        benchmarkTimeoutCounted = false;
                         if (BenchmarkRunning) lock (benchmarkLock) benchmarkAttempts++;
                         Interlocked.Exchange(ref pingSentTimestamp, System.Diagnostics.Stopwatch.GetTimestamp());
                         await writer.WriteLineAsync("PING");
@@ -842,18 +938,33 @@ sealed class Transport : IDisposable
                         await writer.WriteLineAsync($"PICO?,{id}");
                         lastPicoProbe = Environment.TickCount64;
                     }
+                    if (Environment.TickCount64 - lastSummary >= 60000)
+                    {
+                        LogLinkSummary("periodic");
+                        await writer.WriteLineAsync("DIAG");
+                        lastSummary = Environment.TickCount64;
+                    }
                     UpdateAdaptiveMouse();
-                    // Avoid blocking the transport thread in 5ms queue waits.
-                    // Short async delays produce steadier scheduling at 60 Hz.
-                    await Task.Delay(1, cts.Token);
+                    // Sleep until the next mouse slot; queued key/button frames wake the loop at once.
+                    int waitMs = (int)Math.Clamp(targetMs - (NowMs() - lastMouseFlush), 1, targetMs);
+                    await wake.WaitAsync(waitMs, cts.Token);
                 }
             }
             catch (OperationCanceledException) { break; }
-            catch (Exception ex) { DiagnosticLog.Write("Transport retry: " + ex.GetType().Name + ": " + ex.Message); }
+            catch (Exception ex) { reason = ex.GetType().Name + ": " + ex.Message; }
             finally
             {
+                if (timerRaised) TimerResolution.End();
                 Volatile.Write(ref activeHost, null);
-                if (connected) { connected = false; connectedSince = null; Interlocked.Increment(ref reconnects); DiagnosticLog.Write("Transport connection ended."); disconnected(); }
+                if (connected)
+                {
+                    var duration = connectedSince is { } since ? DateTimeOffset.UtcNow - since : TimeSpan.Zero;
+                    connected = false; connectedSince = null; Interlocked.Increment(ref reconnects);
+                    DiagnosticLog.Warn($"Connection ended after {duration:hh\\:mm\\:ss}: {reason}");
+                    LogLinkSummary("at disconnect");
+                    disconnected();
+                }
+                else if (reason != "cancelled") DiagnosticLog.Warn("Connect attempt failed: " + reason);
                 ClearMouseMotion();
                 Interlocked.Exchange(ref mouseLastSentTick, 0);
                 Volatile.Write(ref espRssi, int.MinValue);
@@ -865,5 +976,82 @@ sealed class Transport : IDisposable
             try { await Task.Delay(1000, cts.Token); } catch (OperationCanceledException) { break; }
         }
     }
+
+    // Link health since the last periodic summary; read by the UI and written to the log.
+    readonly object linkLock = new();
+    volatile bool pongSeen;
+    string? firmwareDiag;
+    int summaryPongs, summaryStalls;
+    double summaryRttSum, summaryRttMax, summaryLongestStall;
+    long totalStalls, droppedFrames;
+    double longestStall;
+    long lastStallLogTick;
+    int suppressedStallLogs;
+    public string? FirmwareDiag => Volatile.Read(ref firmwareDiag);
+
+    void ResetLinkSummary()
+    {
+        lock (linkLock) { summaryPongs = summaryStalls = 0; summaryRttSum = summaryRttMax = summaryLongestStall = 0; }
+    }
+
+    void RecordPong(double ms)
+    {
+        lock (linkLock)
+        {
+            summaryPongs++;
+            summaryRttSum += ms;
+            summaryRttMax = Math.Max(summaryRttMax, ms);
+            if (ms < StallThresholdMs) return;
+            summaryStalls++;
+            totalStalls++;
+            summaryLongestStall = Math.Max(summaryLongestStall, ms);
+            longestStall = Math.Max(longestStall, ms);
+            if (ms < 500) return;
+            // Bound log volume on a bad link: one stall line per 5 s plus a suppressed count.
+            long now = Environment.TickCount64;
+            if (now - lastStallLogTick < 5000) { suppressedStallLogs++; return; }
+            string more = suppressedStallLogs > 0 ? $" ({suppressedStallLogs} more since last report)" : "";
+            lastStallLogTick = now;
+            suppressedStallLogs = 0;
+            int rssi = Volatile.Read(ref espRssi);
+            DiagnosticLog.Warn($"Link stall: PONG after {ms:F0} ms, RSSI {(rssi == int.MinValue ? "?" : rssi.ToString())} dBm{more}");
+        }
+    }
+
+    void LogLinkSummary(string when)
+    {
+        string rtt;
+        lock (linkLock)
+        {
+            rtt = summaryPongs > 0
+                ? $"RTT avg/max {summaryRttSum / summaryPongs:F1}/{summaryRttMax:F0} ms over {summaryPongs} pings, stalls>{StallThresholdMs}ms {summaryStalls} (longest {summaryLongestStall:F0} ms)"
+                : "no PONG replies";
+            summaryPongs = summaryStalls = 0;
+            summaryRttSum = summaryRttMax = summaryLongestStall = 0;
+        }
+        DiagnosticLog.Write($"Link summary ({when}): {rtt} | {EspDiagnostics()} | {SchedulerDiagnostics()} | " +
+            $"{MouseDiagnostics()} | {PicoDiagnostics()} | dropped frames {Interlocked.Read(ref droppedFrames)} | disconnections {Reconnects}");
+    }
+
+    public string LinkDiagnostics()
+    {
+        if (!Connected) return "Link: disconnected";
+        lock (linkLock)
+            return $"Link: stalls >{StallThresholdMs} ms this session {totalStalls} (longest {longestStall:F0} ms) | dropped frames {Interlocked.Read(ref droppedFrames)} | timer {(TimerResolution.Active ? "1 ms" : "default")}";
+    }
+
+    bool Enqueue(string frame)
+    {
+        if (!queue.TryAdd(frame))
+        {
+            if (Interlocked.Increment(ref droppedFrames) % 50 == 1)
+                DiagnosticLog.Warn($"Send queue full; dropped frame {frame} (total {Interlocked.Read(ref droppedFrames)})");
+            return false;
+        }
+        // Wake the transport loop now instead of at its next mouse slot.
+        if (wake.CurrentCount == 0) wake.Release();
+        return true;
+    }
+
     public void Dispose() { cts.Cancel(); }
 }

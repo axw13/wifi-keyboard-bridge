@@ -30,6 +30,7 @@ jobs:
           Copy-Item firmware/pico/code.py release/firmware/pico/
           Copy-Item docs/wiring.md release/wiring.md
           Copy-Item docs/protocol.md release/protocol.md
+          Copy-Item docs/troubleshooting.md release/troubleshooting.md
           Copy-Item docs/v2-release.md release/README-FIRST.txt
       - name: Create distributable ZIP
         shell: pwsh

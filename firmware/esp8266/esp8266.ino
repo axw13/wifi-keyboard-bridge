@@ -23,6 +23,25 @@ bool remoteInputActive = false;
 unsigned long lastIdleMove = 0;
 bool idleMoveRight = true;
 
+// Diagnostics: reported to Windows by the DIAG command and written to its log.
+const char* FIRMWARE_VERSION = "2.1";
+const unsigned long AUTH_TIMEOUT_MS = 2000;  // unauthenticated sockets cannot hold the slot
+const unsigned long IDLE_TIMEOUT_MS = 5000;  // client keepalive is every 250 ms
+unsigned long connectedAt = 0;
+unsigned long lastRx = 0;
+unsigned long sessions = 0;
+unsigned long authFailures = 0;
+unsigned long authTimeouts = 0;
+unsigned long idleTimeouts = 0;
+unsigned long watchdogReleases = 0;
+unsigned long invalidFrames = 0;
+unsigned long lineOverflows = 0;
+unsigned long wifiDisconnects = 0;
+int lastWifiDisconnectReason = 0;
+const char* lastSessionEnd = "none";
+char picoCounters[64] = "none";  // latest Pico "C,..." line payload
+WiFiEventHandler wifiDisconnectHandler;
+
 void saveAntiIdle(bool enabled) {
   if (antiIdleEnabled == enabled) return;
   antiIdleEnabled = enabled;
@@ -56,8 +75,13 @@ void readPicoReplies() {
         }
         picoProbePending = false;
       }
+      else if (picoLine.startsWith("C,") && picoLine.length() < sizeof(picoCounters)) {
+        // Pico counters up,frames,bad,watchdog,usb,errors; '/' keeps DIAG comma-separated.
+        picoLine.substring(2).toCharArray(picoCounters, sizeof(picoCounters));
+        for (char* p = picoCounters; *p; p++) if (*p == ',') *p = '/';
+      }
       picoLine = "";
-    } else if (picoLine.length() < 24) picoLine += c;
+    } else if (picoLine.length() < 64) picoLine += c;
     else picoLine = "";
   }
   if (picoProbePending && micros() - picoProbeStart > 500000UL) {
@@ -72,10 +96,13 @@ void releaseKeys() {
   Serial.println("M,0,0,0,0");
   Serial.flush();
 }
-void resetSession() {
+void resetSession(const char* reason) {
   releaseKeys();
   if (client) client.stop();
+  lastSessionEnd = reason;
   authorized = false;
+  // Anti-idle must resume when the PC goes away while inputs were REMOTE.
+  remoteInputActive = false;
   picoProbePending = false;
   picoLine = "";
   line = "";
@@ -85,7 +112,15 @@ void setup() {
   antiIdleEnabled = EEPROM.read(0) == 0xA5;
   Serial.begin(115200);  // GPIO1 TX → Pico GP1 RX; must match Pico UART
   picoDiagnostics.begin(115200);  // GPIO14/D5 RX ← Pico GP0 TX (diagnostics only)
+  WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
+  // Modem sleep adds 100+ ms latency spikes; this device is mains powered.
+  WiFi.setSleepMode(WIFI_NONE_SLEEP);
+  WiFi.setAutoReconnect(true);
+  wifiDisconnectHandler = WiFi.onStationModeDisconnected([](const WiFiEventStationModeDisconnected& e) {
+    wifiDisconnects++;
+    lastWifiDisconnectReason = e.reason;
+  });
   WiFi.hostname("wifi-keyboard-bridge");
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   while (WiFi.status() != WL_CONNECTED) delay(400);
@@ -94,21 +129,56 @@ void setup() {
   if (MDNS.begin("wifi-keyboard-bridge"))
     MDNS.addService("keyboardbridge", "tcp", 7777);
 }
+void sendStat() {
+  char buf[96];
+  int n = snprintf(buf, sizeof(buf), "STAT,%d,%u,%lu,%lu\n", WiFi.RSSI(), (unsigned)ESP.getFreeHeap(), serialFrames, serialBytes);
+  client.write((const uint8_t*)buf, n);
+}
+void sendDiag() {
+  // key=value pairs so fields can be added without breaking older clients.
+  char reset[40];
+  ESP.getResetReason().toCharArray(reset, sizeof(reset));
+  for (char* p = reset; *p; p++) if (*p == ',') *p = ' ';
+  char buf[512];
+  int n = snprintf(buf, sizeof(buf),
+    "DIAG,fw=%s,up=%lu,rssi=%d,ch=%d,heap=%u,frag=%u,sessions=%lu,authfail=%lu,authtimeout=%lu,"
+    "idletimeout=%lu,wdrelease=%lu,badframe=%lu,overflow=%lu,picotimeout=%lu,wifidrop=%lu,"
+    "wifireason=%d,lastend=%s,pico=%s,reset=%s\n",
+    FIRMWARE_VERSION, millis() / 1000, WiFi.RSSI(), WiFi.channel(), (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getHeapFragmentation(),
+    sessions, authFailures, authTimeouts, idleTimeouts, watchdogReleases, invalidFrames, lineOverflows,
+    picoProbeTimeouts, wifiDisconnects, lastWifiDisconnectReason, lastSessionEnd, picoCounters, reset);
+  if (n >= (int)sizeof(buf)) n = sizeof(buf) - 1;
+  buf[n - 1] = '\n';
+  client.write((const uint8_t*)buf, n);
+}
 void loop() {
   MDNS.update();
   readPicoReplies();
   tickAntiIdle();
   if (!client || !client.connected()) {
-    if (authorized) resetSession();
+    if (authorized) resetSession("closed");
     WiFiClient candidate = server.available();
     if (candidate) {
       client = candidate;
       client.setNoDelay(true);
       authorized = false;
       line = "";
+      connectedAt = lastRx = millis();
     }
     return;
   }
+  if (!authorized && millis() - connectedAt > AUTH_TIMEOUT_MS) {
+    authTimeouts++;
+    resetSession("auth-timeout");
+    return;
+  }
+  if (authorized && millis() - lastRx > IDLE_TIMEOUT_MS) {
+    // Half-open session (PC crashed or lost Wi-Fi); free the slot for a reconnect.
+    idleTimeouts++;
+    resetSession("idle-timeout");
+    return;
+  }
+  if (client.available()) lastRx = millis();
   while (client.available()) {
     char c = (char)client.read();
     if (c == '\r') continue;
@@ -116,21 +186,19 @@ void loop() {
       if (!authorized) {
         if (line == String("AUTH ") + SHARED_TOKEN) {
           authorized = true;
+          sessions++;
           client.println("OK");
           lastFrame = millis();
         } else {
+          authFailures++;
           client.println("ERR");
-          client.stop();
+          resetSession("auth-failed");
+          return;
         }
       } else if (line == "STAT") {
-        client.print("STAT,");
-        client.print(WiFi.RSSI());
-        client.print(",");
-        client.print(ESP.getFreeHeap());
-        client.print(",");
-        client.print(serialFrames);
-        client.print(",");
-        client.println(serialBytes);
+        sendStat();
+      } else if (line == "DIAG") {
+        sendDiag();
       } else if (line.startsWith("PICO?,")) {
         unsigned long id = line.substring(6).toInt();
         if (line.length() <= 11 && id <= 65535 && line == String("PICO?,") + id && !picoProbePending) {
@@ -161,13 +229,14 @@ void loop() {
           serialFrames++;
           serialBytes += line.length() + 2;
           lastFrame = millis();
-        }
+        } else invalidFrames++;
       }
       line = "";
     } else if (line.length() < 127) line += c;
-    else { resetSession(); return; }
+    else { lineOverflows++; resetSession("line-overflow"); return; }
   }
   if (authorized && millis() - lastFrame > 1500) {
+    watchdogReleases++;
     releaseKeys();
     lastFrame = millis();
   }

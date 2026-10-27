@@ -38,6 +38,7 @@ Connection details are redacted for public documentation.
 - Numeric keypad input with scan-code handling for Num Lock
 - Connection telemetry, Wi-Fi RTT graph, Pico UART diagnostic round-trip,
   benchmarking, exportable diagnostics and rotating local logs
+  (see [docs/troubleshooting.md](docs/troubleshooting.md) for lag and disconnects)
 - Configurable startup, first-run connection wizard, standalone Windows build,
   single-instance protection and connection-aware tray status
 - Optional **remote anti-idle** mouse mover: when enabled and both inputs
