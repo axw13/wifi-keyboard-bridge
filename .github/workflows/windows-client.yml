@@ -18,6 +18,8 @@ jobs:
           dotnet-version: '8.0.x'
       - name: Build
         run: dotnet build windows-client/KeyboardBridge/KeyboardBridge.csproj -c Release
+      - name: Protocol and crypto tests
+        run: dotnet run --project windows-client/KeyboardBridge.Tests -c Release
       - name: Publish standalone Windows x64
         run: dotnet publish windows-client/KeyboardBridge/KeyboardBridge.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o release
       - name: Include setup documentation and firmware in release package
@@ -45,3 +47,16 @@ jobs:
         with:
           files: WiFi-Keyboard-Bridge-win-x64.zip
           prerelease: false
+
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Compile ESP8266 firmware
+        run: |
+          URL=https://arduino.esp8266.com/stable/package_esp8266com_index.json
+          cp firmware/esp8266/secrets.example.h firmware/esp8266/secrets.h
+          arduino-cli core update-index --additional-urls "$URL"
+          arduino-cli core install esp8266:esp8266@3.1.2 --additional-urls "$URL"
+          arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 firmware/esp8266

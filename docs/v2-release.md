@@ -23,7 +23,7 @@ in its permanent destination. To stop startup, uncheck that option.
 
 This remains a PREVIEW. Validate held mouse buttons/modifier keys and disconnect
 recovery on your own hardware. Keep existing known-working firmware as a backup.
-The plain TCP token is for use on a trusted LAN only; do not expose port 7777.
+Traffic is encrypted and authenticated (firmware 3.0 + matching client); still do not expose ports 7777/7778.
 
 Release procedure: first verify the GitHub Actions Windows build, then test the
 downloaded artifact on Windows. Only after acceptance tag an actual release.

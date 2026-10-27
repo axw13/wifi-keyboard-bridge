@@ -1,6 +1,7 @@
 # Keyboard state protocol
 
-Main PC connects to ESP8266 TCP port 7777. Send `AUTH <token>\n`, receive `OK\n` or `ERR\n`.
+Main PC connects to ESP8266 TCP port 7777 and runs the v3 handshake (see **Security** below). After it, every
+command in this document is an encrypted, authenticated line; the examples show the plaintext of each line.
 
 Every key-state change sends:
 ```text
@@ -10,7 +11,7 @@ Values are decimal USB HID keyboard usages, with zero for empty slots. The first
 
 NodeMCU releases keys after 1.5 s without a frame; Pico releases them after 2 s without a valid frame. These are fallbacks, not delivery acknowledgments.
 
-**Security:** Token is plaintext over TCP; use only a trusted LAN, firewall port 7777, never port-forward it to the internet. No end-to-end acknowledgment or encryption. Reliability is constrained by UART 115200 baud, Wi-Fi and six-key HID rollover.
+**Reliability:** there is no end-to-end acknowledgment of key delivery; reliability is constrained by UART 115200 baud, Wi-Fi and six-key HID rollover.
 
 ## Optional V2 Pico diagnostic probe (experimental)
 
@@ -35,36 +36,81 @@ This is a **UART probe round trip**, *not* a measurement of Windows-to-Pico, USB
 Pico → NodeMCU diagnostic lines: `A,<id>` (probe reply), then
 `C,<uptime s>,<frames>,<bad frames>,<watchdog releases>,<usb errors>,<loop errors>`.
 
-## UDP fast path (firmware 2.4+, optional)
+## Security (protocol v3, firmware 3.0+)
+
+The shared token **never crosses the network** and nothing after the handshake is readable. The plaintext
+`AUTH <token>` of earlier versions is gone: firmware 3.0 refuses it and a v3 client refuses older firmware.
+
+**Handshake** (the only plaintext, newline-terminated hex lines):
+
+```text
+client -> HELLO2 <cn>                                              cn: 16 random bytes
+server -> CHAL <sn> <HMAC-SHA256(token, "WKB3-srv" | cn | sn)>     sn: 16 random bytes (hardware RNG)
+client -> PROOF <HMAC-SHA256(token, "WKB3-cli" | cn | sn)>
+```
+
+* The client checks the server's proof first, so an impostor NodeMCU (or an mDNS spoof) that does not know the token is
+  refused before the client reveals anything. The server then checks the client's proof in constant time.
+* Both sides derive `okm = HKDF-SHA256(salt = cn | sn, ikm = token, info = "WKB3 keys", 64 bytes)`:
+  `okm[0..32]` encrypts client-to-server traffic, `okm[32..64]` server-to-client. Keys are fresh per session
+  and wiped from the NodeMCU's RAM when it ends.
+* The server's first encrypted frame is `OK`; decrypting it proves both sides derived the same keys. A failed login gets
+  a bare `ERR` and the socket is closed. Consecutive failures delay the next accepted connection
+  (0.5 s, 1 s, 2 s, ... up to 8 s), so online guessing is impractical.
+
+**TCP framing** after `OK`: `[length: u16 LE][ciphertext][tag: 16]`, ChaCha20-Poly1305 (RFC 8439). The nonce is
+`01 00 00 00 | frame counter (u64 LE)`, counted separately per direction from 0; the two length bytes are authenticated
+as associated data. A frame that fails authentication, is replayed, reordered, dropped or longer than 128 bytes
+(client to NodeMCU) ends the session immediately; the NodeMCU records `lastend=bad-tag` and counts `badtag` in `DIAG`.
+
+**What this protects against:** eavesdropping on keystrokes, token capture, forged or injected input (TCP and UDP),
+replay, and a fake NodeMCU. **What it does not:** someone who already knows the token, a compromised PC or NodeMCU,
+traffic analysis (the timing and size of packets still show *that* you are typing), or denial of service by jamming or
+flooding. The token is a pre-shared secret, so use 16+ random characters: an attacker who records a handshake can try
+guesses offline. Keep `secrets.h` and `appsettings.json` private. Do not forward ports 7777/7778 to the internet.
+
+## UDP fast path (firmware 2.4+, optional; encrypted since 3.0)
 
 TCP delivers in order, so one lost Wi-Fi packet delays every key and mouse report behind it, and
 TCP's retransmit backoff keeps them waiting after the link has recovered. The UDP fast path avoids
 that: every datagram is a complete, idempotent snapshot, so a lost datagram is repaired by the next
 one and a late one is dropped by sequence number.
 
-1. After `OK`, the client sends `UDP?`. A 2.4+ NodeMCU answers `UDP,<port>,<sid>` (port 7778, `sid` a random
-   32-bit session id). Older firmware ignores the command and the client stays on TCP.
-2. The client sends datagrams to that port. The NodeMCU accepts them only from the TCP peer's IP address
-   and with the issued `sid`. Little endian:
+1. After the handshake the client sends `UDP?`. The NodeMCU answers `UDP,<port>` (7778).
+2. The client sends datagrams to that port, little endian, encrypted with the same session keys:
 
    | Type | Layout | Size |
    | --- | --- | --- |
-   | State `0xB1` | `B1 sid(4) seq(2) mods keys(6) buttons x(2) y(2) wheel(2)` | 21 B |
-   | Ping `0xB2` | `B2 sid(4) seq(2) payload(4)`, echoed back unchanged | 11 B |
+   | State `0xC1` | `C1 seq(4) enc(mods keys(6) buttons x(2) y(2) wheel(2)) tag(16)` | 35 B |
+   | Ping `0xC2` | `C2 seq(4) enc(payload(4)) tag(16)`; answered by `C3` with the NodeMCU's own counter | 25 B |
 
-   `x`, `y` and `wheel` are cumulative signed 16-bit counters (wrapping) that start at zero when `UDP?` is
-   answered. The NodeMCU forwards the difference since the last accepted datagram to the Pico as ordinary
-   `M,` reports (at most 16 per datagram; anything beyond is dropped), and forwards `S,` only when the keys
-   change or every 250 ms as the Pico's keepalive. A held mouse button or key state is repeated in every datagram.
-3. While UDP is active the client sends no `S,`/`M,` over TCP (an old, delayed TCP frame could otherwise
-   undo a newer state). TCP still carries `PING`, `STAT`, `DIAG`, `IDLE` and the other commands.
-4. The client sends a state datagram on every change (repeated for the next 3 mouse slots), every mouse
-   slot with motion, and at least every 250 ms.
-5. `UACK?` -> `UACK,<datagrams accepted>,<lost by sequence gap>,<stale or duplicate>`. If the accepted count
-   does not move for three checks (6 s) while the client keeps sending, the client logs a warning and falls
-   back to TCP for the rest of the session (e.g. UDP filtered by the router).
+   The first 5 bytes are authenticated as associated data. The nonce is `02 00 00 00 | seq (u64 LE)`; **one
+   sequence counter covers state and ping packets**, so a (key, nonce) pair is never reused. The NodeMCU drops a
+   datagram unless it is from the TCP peer's address, newer than the last accepted one, and authentic; the replay
+   window only moves after the tag verifies, so forged packets cannot lock the real client out.
+   `x`, `y` and `wheel` are cumulative signed 16-bit counters (wrapping) starting at zero when `UDP?` is answered.
+   The NodeMCU forwards the difference as ordinary `M,` reports (at most 16 per datagram; the rest is dropped) and
+   forwards `S,` only when the keys change or every 250 ms as the Pico's keepalive.
+3. While UDP is active the client sends no `S,`/`M,` over TCP (a delayed TCP frame could undo a newer state).
+   TCP still carries `PING`, `STAT`, `DIAG`, `IDLE` and the other commands.
+4. The client sends a state datagram on every change (repeated for the next 3 mouse slots), every mouse slot with
+   motion, and at least every 250 ms.
+5. `UACK?` -> `UACK,<datagrams accepted>,<lost by sequence gap>,<stale or duplicate>`. If the accepted count does not
+   move for three checks (6 s) while the client keeps sending, the client logs a warning and falls back to TCP for the
+   rest of the session (for example when the router filters UDP).
+6. `SELFTEST` -> `SELFTEST,OK` (or `SELFTEST,FAIL,<mask>`): the firmware runs RFC 4231, RFC 5869 and RFC 8439
+   known-answer tests.
 
-`DIAG` gains `udp=`, `udplost=`, `udpstale=` and `udpbad=`. Set `"UseUdp": false` in `appsettings.json` to force TCP.
+`DIAG` gains `sec=3`, `badtag=`, `udp=`, `udplost=`, `udpstale=` and `udpbad=` (datagrams that were forged, malformed or
+arrived with no UDP session). Set `"UseUdp": false` in `appsettings.json` to force TCP.
+
+## Tests
+
+`dotnet run --project windows-client/KeyboardBridge.Tests` runs the published test vectors, key derivation, tamper
+detection (every single-bit change), replay/reorder/oversize handling and a handshake against an in-process server.
+Add `-- --device` (Windows client closed, Pico plugged into the same PC) to also test the real NodeMCU: cross-implementation
+handshake, firmware self-test, wrong-token and back-off behaviour, tampered and replayed TCP and UDP traffic, a wire capture
+showing no token or command text in the clear, and key/mouse delivery through the Pico with latency.
 
 ## Session timeouts
 
