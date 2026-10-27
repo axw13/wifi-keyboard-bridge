@@ -100,8 +100,11 @@ See [first-run and optional Pico USB storage settings](docs/first-run-and-pico-u
 
 ## Limitations and safety
 
-- Only use TCP port 7777 on a **trusted local network**. The shared token
-  is sent in plaintext. Do not expose the port to the public internet.
+- Traffic between the PC and the NodeMCU is authenticated and encrypted (protocol v3):
+  the token is never sent, both sides prove they know it, and input is
+  ChaCha20-Poly1305 encrypted. Keep the token secret and random (16+ characters)
+  and do not expose ports 7777/7778 to the internet. Firmware 3.0 and the
+  matching client must be installed together; see `docs/protocol.md`.
 - Remote keyboard LED status is not synchronized to the local keyboard's
   physical lock LEDs.
 - Keyboard uses standard six-nonmodifier-key HID boot reports; some layouts,

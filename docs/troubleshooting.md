@@ -16,7 +16,7 @@ logged.
 | --- | --- |
 | `Application starting` / `Configuration:` | Version, Windows build, host/port/mDNS setting |
 | `Connected to … TCP connect X ms, authenticated Y ms` | Each successful session |
-| `Connect attempt failed: …` | Host unreachable, auth timeout, or `token mismatch?` |
+| `Connect attempt failed: …` | Host unreachable, auth timeout, `wrong token or an impostor`, `firmware 3.0 or newer`, or `token mismatch?` |
 | `Connection ended after hh:mm:ss: …` | Why the session ended, followed by a link summary |
 | `No PONG for N ms; link presumed dead` | NodeMCU stopped answering for 10 s; the client reconnects instead of silently swallowing input |
 | `Link stall: PONG after N ms, <direction>, RSSI R dBm` | A Wi-Fi stall of 500 ms or more (at most one line per 5 s). After each stall the client asks the NodeMCU (`GAP?`) how long it went without data. `PC->NodeMCU stalled` means your input really stopped arriving. `NodeMCU->PC replies delayed; input kept arriving` means typing and mouse still reached the remote PC and only the replies were late. With firmware older than 2.3 the line says `likely …`, a guess from Windows TCP retransmits. That guess is unreliable, because Windows also retransmits when only the NodeMCU's ACKs are lost |

@@ -654,8 +654,9 @@ sealed class Transport : IDisposable
     volatile bool udpReady;
     volatile bool udpDirty;
     int keyRepeat;                       // extra copies of a key change (cheap insurance against one lost datagram)
-    uint udpSid;
-    ushort udpSeq, udpPingSeq;
+    SessionKeys? sessionKeys;
+    Aead? udpSend, udpReceive;
+    uint udpSeq, udpLastRxSeq;
     readonly byte[] kbState = new byte[7];  // modifier + six keys, kept current in both modes
     int cumX, cumY, cumWheel;
     long lastUdpSend, lastUdpPing;
@@ -731,7 +732,7 @@ sealed class Transport : IDisposable
     }
     // Emit at most one HID movement report per interval. Bursting several
     // reports at once makes pointer motion appear to jump even when RTT is low.
-    async Task FlushMouseMovementAsync(StreamWriter writer, bool viaUdp)
+    async Task FlushMouseMovementAsync(SecureLink writer, bool viaUdp)
     {
         int dx, dy, buttons;
         lock (motionLock)
@@ -853,15 +854,10 @@ sealed class Transport : IDisposable
                 }
                 using var socket = attempt;
                 long connectMs = connectWatch.ElapsedMilliseconds;
-                var stream = socket.GetStream();
-                using var writer = new StreamWriter(stream, new UTF8Encoding(false), 1024, leaveOpen: true) { AutoFlush = true };
-                using var reader = new StreamReader(stream, Encoding.ASCII, false, 1024, leaveOpen: true);
-                await writer.WriteLineAsync("AUTH " + cfg.Token);
-                string? authReply;
-                try { authReply = await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(3), cts.Token); }
-                catch (TimeoutException) { throw new IOException("Authentication timed out (no reply within 3 s)"); }
-                if (authReply == "ERR") throw new IOException("Authentication rejected by NodeMCU (token mismatch?)");
-                if (authReply != "OK") throw new IOException("Authentication failed (reply: " + (authReply ?? "connection closed") + ")");
+                // Mutual challenge-response, then every byte is encrypted and authenticated (SecureChannel.cs).
+                using var writer = await SecureLink.ConnectAsync(socket.GetStream(), cfg.Token, cts.Token);
+                var reader = writer;
+                sessionKeys = writer.Keys;
                 DiagnosticLog.Write($"Connected to {target}:{cfg.Port} via {source}; TCP connect {connectMs} ms, authenticated {connectWatch.ElapsedMilliseconds} ms.");
                 // Only trust and store a discovered address after shared-token authentication.
                 Volatile.Write(ref activeHost, target);
@@ -911,9 +907,9 @@ sealed class Transport : IDisposable
                         else if (response.StartsWith("UDP,"))
                         {
                             var fields = response.Split(',');
-                            if (cfg.UseUdp && !udpReady && fields.Length == 3 && int.TryParse(fields[1], out int udpPort) &&
-                                udpPort is >= 1 and <= 65535 && uint.TryParse(fields[2], out uint sid))
-                                StartUdp(target, udpPort, sid);
+                            if (cfg.UseUdp && !udpReady && fields.Length == 2 && int.TryParse(fields[1], out int udpPort) &&
+                                udpPort is >= 1 and <= 65535)
+                                StartUdp(target, udpPort);
                         }
                         else if (response.StartsWith("UACK,"))
                         {
@@ -1112,9 +1108,12 @@ sealed class Transport : IDisposable
         }
     }
 
-    // Called from the reply reader once the NodeMCU has offered the UDP fast path.
-    void StartUdp(string host, int port, uint sid)
+    // Called from the reply reader once the NodeMCU has offered the UDP fast path. Datagrams are
+    // encrypted and authenticated with the session keys from the TCP handshake.
+    void StartUdp(string host, int port)
     {
+        var keys = sessionKeys;
+        if (keys is null) return;
         UdpClient socket;
         try
         {
@@ -1129,8 +1128,10 @@ sealed class Transport : IDisposable
         lock (udpLock)
         {
             udp = socket;
-            udpSid = sid;
-            udpSeq = udpPingSeq = 0;
+            udpSend = new Aead(keys.ClientToServer);
+            udpReceive = new Aead(keys.ServerToClient);
+            udpSeq = 0;
+            udpLastRxSeq = 0;
             cumX = cumY = cumWheel = 0;  // the NodeMCU starts its counters at zero when it offers UDP
             udpSent = udpPingsSent = udpEchoes = 0;
             espUdpRx = -1; espUdpLost = espUdpStale = 0;
@@ -1141,7 +1142,7 @@ sealed class Transport : IDisposable
         udpDirty = true;
         Interlocked.Exchange(ref keyRepeat, 3);
         udpReady = true;  // last: everything above must be in place before the sender uses it
-        DiagnosticLog.Write($"UDP fast path active ({host}:{port}).");
+        DiagnosticLog.Write($"UDP fast path active ({host}:{port}), encrypted.");
         if (wake.CurrentCount == 0) wake.Release();
     }
 
@@ -1149,50 +1150,54 @@ sealed class Transport : IDisposable
     {
         udpReady = false;
         UdpClient? socket;
-        lock (udpLock) { socket = udp; udp = null; }
+        lock (udpLock)
+        {
+            socket = udp; udp = null;
+            udpSend?.Dispose(); udpReceive?.Dispose();
+            udpSend = udpReceive = null;
+        }
         socket?.Dispose();
     }
 
     void SendUdpState()
     {
-        var p = new byte[21];
         int buttons, wheel;
         lock (motionLock) { buttons = mouseButtons; wheel = pendingWheel; pendingWheel = 0; }
         UdpClient? socket;
+        byte[] packet;
         lock (udpLock)
         {
             socket = udp;
+            if (socket is null || udpSend is null) return;
             cumWheel += wheel;
-            p[0] = UdpState;
-            BitConverter.TryWriteBytes(p.AsSpan(1), udpSid);
-            BitConverter.TryWriteBytes(p.AsSpan(5), ++udpSeq);
-            Array.Copy(kbState, 0, p, 7, 7);
-            p[14] = (byte)buttons;
-            BitConverter.TryWriteBytes(p.AsSpan(15), unchecked((short)cumX));
-            BitConverter.TryWriteBytes(p.AsSpan(17), unchecked((short)cumY));
-            BitConverter.TryWriteBytes(p.AsSpan(19), unchecked((short)cumWheel));
+            var payload = new byte[14];
+            Array.Copy(kbState, payload, 7);
+            payload[7] = (byte)buttons;
+            BitConverter.TryWriteBytes(payload.AsSpan(8), unchecked((short)cumX));
+            BitConverter.TryWriteBytes(payload.AsSpan(10), unchecked((short)cumY));
+            BitConverter.TryWriteBytes(payload.AsSpan(12), unchecked((short)cumWheel));
+            packet = SecureUdp.Build(udpSend, SecureUdp.State, ++udpSeq, payload);
         }
         udpDirty = false;
         if (Volatile.Read(ref keyRepeat) > 0) Interlocked.Decrement(ref keyRepeat);
         lastUdpSend = NowMs();
-        try { socket?.Send(p, p.Length); Interlocked.Increment(ref udpSent); }
+        try { socket.Send(packet, packet.Length); Interlocked.Increment(ref udpSent); }
         catch (Exception ex) when (ex is SocketException or ObjectDisposedException) { }  // TCP notices a dead link
     }
 
     void SendUdpPing()
     {
-        var p = new byte[11];
         UdpClient? socket;
+        byte[] packet;
         lock (udpLock)
         {
             socket = udp;
-            p[0] = UdpPing;
-            BitConverter.TryWriteBytes(p.AsSpan(1), udpSid);
-            BitConverter.TryWriteBytes(p.AsSpan(5), ++udpPingSeq);
+            if (socket is null || udpSend is null) return;
+            // Pings share the sequence counter with state packets: it is the nonce, so it must never repeat.
+            packet = SecureUdp.Build(udpSend, SecureUdp.Ping, ++udpSeq, BitConverter.GetBytes(unchecked((uint)NowMs())));
         }
-        BitConverter.TryWriteBytes(p.AsSpan(7), unchecked((uint)NowMs()));
         lastUdpPing = NowMs();
-        try { socket?.Send(p, p.Length); Interlocked.Increment(ref udpPingsSent); }
+        try { socket.Send(packet, packet.Length); Interlocked.Increment(ref udpPingsSent); }
         catch (Exception ex) when (ex is SocketException or ObjectDisposedException) { }
     }
 
@@ -1203,9 +1208,13 @@ sealed class Transport : IDisposable
             while (!cts.IsCancellationRequested)
             {
                 var result = await socket.ReceiveAsync(cts.Token);
-                var b = result.Buffer;
-                if (b.Length != 11 || b[0] != UdpPing) continue;
-                double ms = unchecked((uint)NowMs() - BitConverter.ToUInt32(b, 7));
+                Aead? cipher;
+                lock (udpLock) cipher = udpReceive;
+                if (cipher is null) return;
+                if (!SecureUdp.TryOpen(cipher, result.Buffer, out byte type, out uint seq, out byte[] payload)) continue;  // forged or corrupted
+                if (type != SecureUdp.Pong || payload.Length != 4 || (int)(seq - udpLastRxSeq) <= 0) continue;  // replay or reorder
+                udpLastRxSeq = seq;
+                double ms = unchecked((uint)NowMs() - BitConverter.ToUInt32(payload, 0));
                 if (ms > 5000) continue;  // a stale echo from before a stall; not a latency sample
                 Interlocked.Increment(ref udpEchoes);
                 lock (timingLock) AddTiming(udpRttHistory, ms);
