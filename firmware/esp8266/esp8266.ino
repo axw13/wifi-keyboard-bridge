@@ -86,6 +86,9 @@ void setup() {
   Serial.begin(115200);  // GPIO1 TX → Pico GP1 RX; must match Pico UART
   picoDiagnostics.begin(115200);  // GPIO14/D5 RX ← Pico GP0 TX (diagnostics only)
   WiFi.mode(WIFI_STA);
+  // A continuously powered HID bridge prioritizes latency over RF power saving.
+  // Modem/light sleep can delay reception of small TCP mouse frames.
+  WiFi.setSleepMode(WIFI_NONE_SLEEP);
   WiFi.hostname("wifi-keyboard-bridge");
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   while (WiFi.status() != WL_CONNECTED) delay(400);
