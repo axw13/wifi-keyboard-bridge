@@ -258,7 +258,9 @@ sealed class SettingsWindow : Form
         diagnostics.SetColumnSpan(linkDiag, 2);
         diagnostics.Controls.Add(firmwareDiag, 0, 8);
         diagnostics.SetColumnSpan(firmwareDiag, 2);
-        diagnostics.RowStyles[8].Height = 64;
+        // Link and firmware lines wrap to three or more lines; fixed 34 px rows clipped them.
+        diagnostics.RowStyles[7].Height = 52;
+        diagnostics.RowStyles[8].Height = 88;
         diagnostics.Controls.Add(rttGraph, 0, 6);
         diagnostics.SetColumnSpan(rttGraph, 2);
         diagnostics.RowStyles[6].Height = 120;
