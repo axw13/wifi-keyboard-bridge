@@ -9,7 +9,8 @@ using System.Drawing;
 
 namespace KeyboardBridge;
 
-record Settings(string Host, int Port, string Token, bool AutoDiscover = false);
+// UseUdp: send input over the UDP fast path when the NodeMCU offers it (firmware 2.4+); TCP stays the fallback.
+record Settings(string Host, int Port, string Token, bool AutoDiscover = false, bool UseUdp = true);
 
 static class Program
 {
@@ -644,6 +645,24 @@ sealed class Transport : IDisposable
     public long Reconnects => Interlocked.Read(ref reconnects);
     public DateTimeOffset? ConnectedSince => connectedSince;
     string last = "S,0,0,0,0,0,0,0";
+
+    // UDP fast path (docs/protocol.md): every datagram carries the full keyboard state and cumulative
+    // mouse counters, so a lost or late datagram never blocks or corrupts the ones after it.
+    const byte UdpState = 0xB1, UdpPing = 0xB2;
+    readonly object udpLock = new();
+    UdpClient? udp;
+    volatile bool udpReady;
+    volatile bool udpDirty;
+    int keyRepeat;                       // extra copies of a key change (cheap insurance against one lost datagram)
+    uint udpSid;
+    ushort udpSeq, udpPingSeq;
+    readonly byte[] kbState = new byte[7];  // modifier + six keys, kept current in both modes
+    int cumX, cumY, cumWheel;
+    long lastUdpSend, lastUdpPing;
+    long udpSent, udpPingsSent, udpEchoes;
+    long espUdpRx = -1, espUdpLost, espUdpStale, uackReplies;
+    readonly Queue<double> udpRttHistory = new();
+    public bool UdpActive => udpReady;
     public bool Connected => connected;
     public Transport(Settings cfg, Action disconnected)
     {
@@ -696,6 +715,14 @@ sealed class Transport : IDisposable
             mouseButtons = buttons;
             // Button presses/releases and wheel remain immediate and reliable.
             if (wheel != 0) pendingWheel = Math.Clamp(pendingWheel + wheel, -127, 127);
+            if (udpReady)
+            {
+                // The next datagram carries the buttons and the wheel counter.
+                udpDirty = true;
+                Interlocked.Exchange(ref keyRepeat, 3);
+                if (wake.CurrentCount == 0) wake.Release();
+                return true;
+            }
             var packet = $"M,{buttons},0,0,{Math.Clamp(pendingWheel,-127,127)}";
             if (!Enqueue(packet)) return false;
             pendingWheel = 0;
@@ -704,7 +731,7 @@ sealed class Transport : IDisposable
     }
     // Emit at most one HID movement report per interval. Bursting several
     // reports at once makes pointer motion appear to jump even when RTT is low.
-    async Task FlushMouseMovementAsync(StreamWriter writer)
+    async Task FlushMouseMovementAsync(StreamWriter writer, bool viaUdp)
     {
         int dx, dy, buttons;
         lock (motionLock)
@@ -717,7 +744,12 @@ sealed class Transport : IDisposable
         }
         if (dx != 0 || dy != 0)
         {
-            await writer.WriteLineAsync($"M,{buttons},{dx},{dy},0");
+            if (viaUdp)
+            {
+                lock (udpLock) { cumX += dx; cumY += dy; }
+                udpDirty = true;
+            }
+            else await writer.WriteLineAsync($"M,{buttons},{dx},{dy},0");
             Interlocked.Increment(ref mouseReports);
             long now = NowMs();
             long previous = Interlocked.Exchange(ref mouseLastSentTick, now);
@@ -749,6 +781,18 @@ sealed class Transport : IDisposable
         for (int i = 0; i < Math.Min(6, keys.Count); i++) six[i] = keys[i];
         string frame = "S," + mods + "," + string.Join(",", six);
         Volatile.Write(ref last, frame);
+        lock (udpLock)
+        {
+            kbState[0] = (byte)mods;
+            for (int i = 0; i < 6; i++) kbState[1 + i] = (byte)six[i];
+        }
+        if (udpReady)
+        {
+            udpDirty = true;
+            Interlocked.Exchange(ref keyRepeat, 3);
+            if (wake.CurrentCount == 0) wake.Release();
+            return true;
+        }
         return Enqueue(frame);
     }
     // Stopwatch-based milliseconds. Environment.TickCount64 only advances in ~15.6 ms
@@ -864,6 +908,25 @@ sealed class Transport : IDisposable
                                 Interlocked.Exchange(ref espBytes, bytes);
                             }
                         }
+                        else if (response.StartsWith("UDP,"))
+                        {
+                            var fields = response.Split(',');
+                            if (cfg.UseUdp && !udpReady && fields.Length == 3 && int.TryParse(fields[1], out int udpPort) &&
+                                udpPort is >= 1 and <= 65535 && uint.TryParse(fields[2], out uint sid))
+                                StartUdp(target, udpPort, sid);
+                        }
+                        else if (response.StartsWith("UACK,"))
+                        {
+                            var fields = response.Split(',');
+                            if (fields.Length == 4 && long.TryParse(fields[1], out long rx) &&
+                                long.TryParse(fields[2], out long lost) && long.TryParse(fields[3], out long stale))
+                            {
+                                Interlocked.Exchange(ref espUdpRx, rx);
+                                Interlocked.Exchange(ref espUdpLost, lost);
+                                Interlocked.Exchange(ref espUdpStale, stale);
+                                Interlocked.Increment(ref uackReplies);
+                            }
+                        }
                         else if (response.StartsWith("GAP,"))
                         {
                             if (long.TryParse(response.AsSpan(4), out long gap)) ResolveStall(gap);
@@ -900,6 +963,9 @@ sealed class Transport : IDisposable
                 lock (timingLock) picoHistory.Clear();
                 await writer.WriteLineAsync("DIAG");
                 await writer.WriteLineAsync("GAP?");  // starts the NodeMCU's gap window for this session
+                if (cfg.UseUdp) await writer.WriteLineAsync("UDP?");  // answered only by firmware 2.4+
+                long udpCheckSent = 0, udpCheckRx = -1, udpCheckReplies = 0;
+                int udpSilentChecks = 0;
                 while (!cts.IsCancellationRequested)
                 {
                     if (readReplies.IsFaulted || readReplies.IsCompleted)
@@ -936,13 +1002,20 @@ sealed class Transport : IDisposable
                         // accumulating (bounded) and goes out as one report when the link recovers,
                         // instead of a burst of stale reports.
                         bool forwardBlocked = UpdateTcpStats(socket.Client, sentAt != 0);
-                        if (!forwardBlocked) await FlushMouseMovementAsync(writer);
+                        if (udpReady) await FlushMouseMovementAsync(writer, true);  // UDP is never blocked by a TCP backlog
+                        else if (!forwardBlocked) await FlushMouseMovementAsync(writer, false);
                         else Interlocked.Increment(ref mouseHeldSlots);
                         lastMouseFlush = mouseTick;
                     }
+                    if (udpReady)
+                    {
+                        if (udpDirty || Volatile.Read(ref keyRepeat) > 0 || NowMs() - lastUdpSend >= 250)
+                            SendUdpState();  // also the keepalive that feeds the NodeMCU watchdog
+                        if (NowMs() - lastUdpPing >= PingIntervalMs) SendUdpPing();
+                    }
                     // Keepalives are never suppressed: they keep the NodeMCU watchdog from
-                    // releasing held keys during a stall on the return path.
-                    if (Environment.TickCount64 - lastKeyboardKeepalive >= 250)
+                    // releasing held keys during a stall on the return path. UDP carries its own.
+                    if (!udpReady && Environment.TickCount64 - lastKeyboardKeepalive >= 250)
                     {
                         await writer.WriteLineAsync(Volatile.Read(ref last)); // Key-hold keepalive
                         lastKeyboardKeepalive = Environment.TickCount64;
@@ -968,6 +1041,26 @@ sealed class Transport : IDisposable
                     {
                         await writer.WriteLineAsync("STAT");
                         lastTelemetryRequest = Environment.TickCount64;
+                        if (udpReady)
+                        {
+                            await writer.WriteLineAsync("UACK?");
+                            // The NodeMCU must keep counting our datagrams. If it stops while we send (UDP
+                            // filtered, client isolation), go back to TCP. Only judged when a reply arrived.
+                            long replies = Interlocked.Read(ref uackReplies), rx = Interlocked.Read(ref espUdpRx);
+                            if (replies != udpCheckReplies)
+                            {
+                                long sentNow = Interlocked.Read(ref udpSent);
+                                if (udpCheckRx >= 0 && rx == udpCheckRx && sentNow - udpCheckSent >= 6) udpSilentChecks++;
+                                else udpSilentChecks = 0;
+                                udpCheckRx = rx; udpCheckSent = sentNow; udpCheckReplies = replies;
+                            }
+                            if (udpSilentChecks >= 3)
+                            {
+                                udpReady = false;
+                                DiagnosticLog.Warn("UDP datagrams are not reaching the NodeMCU; falling back to TCP for this session.");
+                                Enqueue(Volatile.Read(ref last));
+                            }
+                        }
                     }
                     if (Environment.TickCount64 - lastPicoProbe >= 3000)
                     {
@@ -1006,6 +1099,7 @@ sealed class Transport : IDisposable
                     disconnected();
                 }
                 else if (reason != "cancelled") DiagnosticLog.Warn("Connect attempt failed: " + reason);
+                StopUdp();
                 ClearMouseMotion();
                 Interlocked.Exchange(ref mouseLastSentTick, 0);
                 Volatile.Write(ref espRssi, int.MinValue);
@@ -1016,6 +1110,120 @@ sealed class Transport : IDisposable
             }
             try { await Task.Delay(1000, cts.Token); } catch (OperationCanceledException) { break; }
         }
+    }
+
+    // Called from the reply reader once the NodeMCU has offered the UDP fast path.
+    void StartUdp(string host, int port, uint sid)
+    {
+        UdpClient socket;
+        try
+        {
+            socket = new UdpClient();
+            socket.Connect(host, port);
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLog.Warn("UDP fast path unavailable, staying on TCP: " + ex.GetType().Name);
+            return;
+        }
+        lock (udpLock)
+        {
+            udp = socket;
+            udpSid = sid;
+            udpSeq = udpPingSeq = 0;
+            cumX = cumY = cumWheel = 0;  // the NodeMCU starts its counters at zero when it offers UDP
+            udpSent = udpPingsSent = udpEchoes = 0;
+            espUdpRx = -1; espUdpLost = espUdpStale = 0;
+        }
+        lock (timingLock) udpRttHistory.Clear();
+        _ = Task.Run(() => UdpReceiveLoop(socket));
+        lastUdpSend = lastUdpPing = NowMs();
+        udpDirty = true;
+        Interlocked.Exchange(ref keyRepeat, 3);
+        udpReady = true;  // last: everything above must be in place before the sender uses it
+        DiagnosticLog.Write($"UDP fast path active ({host}:{port}).");
+        if (wake.CurrentCount == 0) wake.Release();
+    }
+
+    void StopUdp()
+    {
+        udpReady = false;
+        UdpClient? socket;
+        lock (udpLock) { socket = udp; udp = null; }
+        socket?.Dispose();
+    }
+
+    void SendUdpState()
+    {
+        var p = new byte[21];
+        int buttons, wheel;
+        lock (motionLock) { buttons = mouseButtons; wheel = pendingWheel; pendingWheel = 0; }
+        UdpClient? socket;
+        lock (udpLock)
+        {
+            socket = udp;
+            cumWheel += wheel;
+            p[0] = UdpState;
+            BitConverter.TryWriteBytes(p.AsSpan(1), udpSid);
+            BitConverter.TryWriteBytes(p.AsSpan(5), ++udpSeq);
+            Array.Copy(kbState, 0, p, 7, 7);
+            p[14] = (byte)buttons;
+            BitConverter.TryWriteBytes(p.AsSpan(15), unchecked((short)cumX));
+            BitConverter.TryWriteBytes(p.AsSpan(17), unchecked((short)cumY));
+            BitConverter.TryWriteBytes(p.AsSpan(19), unchecked((short)cumWheel));
+        }
+        udpDirty = false;
+        if (Volatile.Read(ref keyRepeat) > 0) Interlocked.Decrement(ref keyRepeat);
+        lastUdpSend = NowMs();
+        try { socket?.Send(p, p.Length); Interlocked.Increment(ref udpSent); }
+        catch (Exception ex) when (ex is SocketException or ObjectDisposedException) { }  // TCP notices a dead link
+    }
+
+    void SendUdpPing()
+    {
+        var p = new byte[11];
+        UdpClient? socket;
+        lock (udpLock)
+        {
+            socket = udp;
+            p[0] = UdpPing;
+            BitConverter.TryWriteBytes(p.AsSpan(1), udpSid);
+            BitConverter.TryWriteBytes(p.AsSpan(5), ++udpPingSeq);
+        }
+        BitConverter.TryWriteBytes(p.AsSpan(7), unchecked((uint)NowMs()));
+        lastUdpPing = NowMs();
+        try { socket?.Send(p, p.Length); Interlocked.Increment(ref udpPingsSent); }
+        catch (Exception ex) when (ex is SocketException or ObjectDisposedException) { }
+    }
+
+    async Task UdpReceiveLoop(UdpClient socket)
+    {
+        try
+        {
+            while (!cts.IsCancellationRequested)
+            {
+                var result = await socket.ReceiveAsync(cts.Token);
+                var b = result.Buffer;
+                if (b.Length != 11 || b[0] != UdpPing) continue;
+                double ms = unchecked((uint)NowMs() - BitConverter.ToUInt32(b, 7));
+                if (ms > 5000) continue;  // a stale echo from before a stall; not a latency sample
+                Interlocked.Increment(ref udpEchoes);
+                lock (timingLock) AddTiming(udpRttHistory, ms);
+            }
+        }
+        catch (Exception) { }  // socket disposed at session end, or an ICMP port-unreachable on a dead peer
+    }
+
+    public string UdpDiagnostics()
+    {
+        if (!udpReady) return cfg.UseUdp ? "UDP: off (TCP)" : "UDP: disabled";
+        long pings = Interlocked.Read(ref udpPingsSent), echoes = Interlocked.Read(ref udpEchoes);
+        string rtt;
+        lock (timingLock) rtt = TimingSummary(udpRttHistory);
+        // The latest ping may still be in flight, so allow one outstanding before counting loss.
+        long missing = Math.Max(0, pings - echoes - 1);
+        return $"UDP on: {Interlocked.Read(ref udpSent)} datagrams, NodeMCU rx {Interlocked.Read(ref espUdpRx)} lost {Interlocked.Read(ref espUdpLost)} stale {Interlocked.Read(ref espUdpStale)} | " +
+            $"UDP ping avg/P95/max {rtt}, unanswered {missing}/{pings}";
     }
 
     // Link health since the last periodic summary; read by the UI and written to the log.
@@ -1111,7 +1319,7 @@ sealed class Transport : IDisposable
             summaryPongs = summaryStalls = 0;
             summaryRttSum = summaryRttMax = summaryLongestStall = 0;
         }
-        DiagnosticLog.Write($"Link summary ({when}): {rtt} | {LinkDiagnostics()} | {EspDiagnostics()} | {SchedulerDiagnostics()} | " +
+        DiagnosticLog.Write($"Link summary ({when}): {rtt} | {LinkDiagnostics()} | {EspDiagnostics()} | {UdpDiagnostics()} | {SchedulerDiagnostics()} | " +
             $"{MouseDiagnostics()} | {PicoDiagnostics()} | dropped frames {Interlocked.Read(ref droppedFrames)} | disconnections {Reconnects}");
     }
 
