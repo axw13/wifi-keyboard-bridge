@@ -27,6 +27,7 @@ This is a **UART probe round trip**, *not* a measurement of Windows-to-Pico, USB
 | `PING` | `PONG` | Link RTT. Sent every 500 ms, one outstanding at a time |
 | `STAT` | `STAT,<rssi>,<free heap>,<uart frames>,<uart bytes>` | Telemetry, every 2 s |
 | `DIAG` | `DIAG,key=value,...` | Diagnostic counters (see `docs/troubleshooting.md`), at connect and every 60 s. Unknown keys must be ignored |
+| `GAP?` | `GAP,<ms>` | Longest gap between data received from the client since the previous `GAP?`. The client asks after each stall to tell its direction (firmware 2.3+) |
 | `PICO?,<id>` | `PICO,<id>,<µs>` | UART probe (above) |
 | `IDLE,ON` / `IDLE,OFF` / `IDLE?` | `IDLE,ON` or `IDLE,OFF` | Persisted anti-idle setting |
 | `IDLE,PAUSE` / `IDLE,RESUME` | — | Pause anti-idle while inputs are REMOTE. Cleared automatically when the session ends |
@@ -39,7 +40,10 @@ Pico → NodeMCU diagnostic lines: `A,<id>` (probe reply), then
 * NodeMCU closes a connection that has not authenticated within 2 s.
 * NodeMCU closes an authenticated session after 5 s without any received data.
   Clients must send at least every 250 ms.
-* The Windows client treats 5 s without a `PONG` as a dead link and reconnects.
+* The Windows client treats 10 s without a `PONG` as a dead link and reconnects.
+  Replies can be lost for several seconds while input still arrives, so this
+  only catches a NodeMCU that is gone. On reconnect it tries the last
+  authenticated address for 1 s before falling back to mDNS.
   While more than 200 bytes it sent are unacknowledged (Windows `TCP_INFO`), it
   holds mouse motion (accumulated, bounded) so stale reports don't queue behind a
   Wi-Fi retransmission. Keepalives are always sent.

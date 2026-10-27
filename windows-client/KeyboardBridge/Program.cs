@@ -73,6 +73,7 @@ sealed class BridgeContext : ApplicationContext
     // Keys whose key-down Windows received locally must also have their key-up passed locally.
     readonly HashSet<int> localDown = new();
     bool remote;
+    bool exiting;
     bool hotkeyLatch;
     int toggleVk;
     int keyboardMods = 3, mouseMods = 3, emergencyVk = 0x79, emergencyMods = 3;
@@ -87,7 +88,8 @@ sealed class BridgeContext : ApplicationContext
     public BridgeContext(Settings cfg)
     {
         ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
-        network = new Transport(cfg, () => ui.Post(_ => { SwitchLocal(); ToggleMouseTo(false); }, null));
+        // The transport may report its disconnect after ExitThreadCore disposed the tray icon.
+        network = new Transport(cfg, () => ui.Post(_ => { if (!exiting) { SwitchLocal(); ToggleMouseTo(false); } }, null));
         var preferences = UserPreferences.Load(prefPath);
         toggleVk = preferences.ToggleKey == 0x79 ? 0x7B : preferences.ToggleKey;
         mouseToggleVk = preferences.MouseToggleKey == 0x79 || preferences.MouseToggleKey == toggleVk ? 0x7A : preferences.MouseToggleKey;
@@ -243,12 +245,10 @@ sealed class BridgeContext : ApplicationContext
     }
     void UpdateTray()
     {
+        if (exiting) return;
         bool online = network.Connected;
-        if (lastConnectionState != online)
-        {
-            DiagnosticLog.Write(online ? "Connected to NodeMCU." : "NodeMCU disconnected.");
-            lastConnectionState = online;
-        }
+        // Connection changes are logged by the transport with their cause.
+        lastConnectionState = online;
         tray.Icon = !online ? disconnectedIcon : remote || mouseRemote ? remoteIcon : localIcon;
         tray.Text = "Bridge: " + (!online ? "DISCONNECTED" : "CONNECTED") + " | K " + (remote ? "R" : "L") + " M " + (mouseRemote ? "R" : "L");
     }
@@ -373,6 +373,7 @@ sealed class BridgeContext : ApplicationContext
     protected override void ExitThreadCore()
     {
         EmergencyLocal("application exit");
+        exiting = true;
         Microsoft.Win32.SystemEvents.PowerModeChanged -= OnPowerModeChanged;
         System.Net.NetworkInformation.NetworkChange.NetworkAvailabilityChanged -= OnNetworkAvailabilityChanged;
         trayTimer.Stop();
@@ -761,7 +762,20 @@ sealed class Transport : IDisposable
     // Unacknowledged bytes to the NodeMCU above this mean the PC -> NodeMCU direction is stuck
     // (normally only a frame or two is in flight). Mouse motion is held only then.
     const int ForwardBacklogBytes = 200;
-    const int DeadLinkMs = 5000;       // no PONG for this long: drop the socket and reconnect
+    // No PONG for this long: drop the socket and reconnect. Replies can be lost for several
+    // seconds while input still reaches the NodeMCU, so this only catches a NodeMCU that is gone.
+    const int DeadLinkMs = 10000;
+
+    // Connects within timeoutMs, or returns null so the caller can fall back to mDNS.
+    async Task<TcpClient?> TryConnectAsync(string host, int port, int timeoutMs)
+    {
+        var socket = new TcpClient { NoDelay = true };
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
+        timeout.CancelAfter(timeoutMs);
+        try { await socket.ConnectAsync(host, port, timeout.Token); return socket; }
+        catch (Exception) when (!cts.IsCancellationRequested) { socket.Dispose(); return null; }
+        catch { socket.Dispose(); throw; }
+    }
 
     async Task Run()
     {
@@ -771,10 +785,12 @@ sealed class Transport : IDisposable
             string reason = "cancelled";
             try
             {
-                using var socket = new TcpClient { NoDelay = true };
                 string target = Volatile.Read(ref fallbackHost);
-                string source = "manual host";
-                if (cfg.AutoDiscover)
+                string source = "saved host";
+                var connectWatch = System.Diagnostics.Stopwatch.StartNew();
+                // Try the last authenticated address first; mDNS costs 1.5-3 s per reconnect.
+                TcpClient? attempt = cfg.AutoDiscover ? await TryConnectAsync(target, cfg.Port, 1000) : null;
+                if (attempt is null && cfg.AutoDiscover)
                 {
                     string? discovered = await MdnsDiscovery.ResolveAsync(cts.Token);
                     if (discovered != null)
@@ -783,10 +799,15 @@ sealed class Transport : IDisposable
                         source = "mDNS";
                         DiagnosticLog.Write("mDNS resolved NodeMCU at " + discovered);
                     }
-                    else DiagnosticLog.Warn("mDNS unavailable; trying saved manual host " + target);
+                    else DiagnosticLog.Warn("Saved host and mDNS both unavailable; retrying " + target);
                 }
-                var connectWatch = System.Diagnostics.Stopwatch.StartNew();
-                await socket.ConnectAsync(target, cfg.Port, cts.Token);
+                if (attempt is null)
+                {
+                    attempt = new TcpClient { NoDelay = true };
+                    try { await attempt.ConnectAsync(target, cfg.Port, cts.Token); }
+                    catch { attempt.Dispose(); throw; }
+                }
+                using var socket = attempt;
                 long connectMs = connectWatch.ElapsedMilliseconds;
                 var stream = socket.GetStream();
                 using var writer = new StreamWriter(stream, new UTF8Encoding(false), 1024, leaveOpen: true) { AutoFlush = true };
@@ -843,6 +864,10 @@ sealed class Transport : IDisposable
                                 Interlocked.Exchange(ref espBytes, bytes);
                             }
                         }
+                        else if (response.StartsWith("GAP,"))
+                        {
+                            if (long.TryParse(response.AsSpan(4), out long gap)) ResolveStall(gap);
+                        }
                         else if (response.StartsWith("DIAG,"))
                         {
                             Volatile.Write(ref firmwareDiag, response[5..]);
@@ -874,6 +899,7 @@ sealed class Transport : IDisposable
                 Interlocked.Exchange(ref picoLastAckTick, lastPicoProbe);
                 lock (timingLock) picoHistory.Clear();
                 await writer.WriteLineAsync("DIAG");
+                await writer.WriteLineAsync("GAP?");  // starts the NodeMCU's gap window for this session
                 while (!cts.IsCancellationRequested)
                 {
                     if (readReplies.IsFaulted || readReplies.IsCompleted)
@@ -930,6 +956,14 @@ sealed class Transport : IDisposable
                         Interlocked.Exchange(ref pingSentTimestamp, System.Diagnostics.Stopwatch.GetTimestamp());
                         await writer.WriteLineAsync("PING");
                     }
+                    if (gapQueryNeeded)
+                    {
+                        gapQueryNeeded = false;
+                        await writer.WriteLineAsync("GAP?");
+                    }
+                    long stallAt;
+                    lock (linkLock) stallAt = pendingStallAt;
+                    if (stallAt != 0 && Environment.TickCount64 - stallAt > 3000) ResolveStall(null);
                     if (Environment.TickCount64 - lastTelemetryRequest >= 2000)
                     {
                         await writer.WriteLineAsync("STAT");
@@ -1003,6 +1037,8 @@ sealed class Transport : IDisposable
             summaryPongs = summaryStalls = 0; summaryRttSum = summaryRttMax = summaryLongestStall = 0;
             tcpBaselineSet = false; tcpRetrans = tcpTimeouts = retransAtPing = timeoutsAtPing = 0;
             forwardBlockedDuringPing = false;
+            pendingStallMs = 0; pendingStallTcpHint = false; pendingStallAt = 0;
+            gapQueryNeeded = false;
         }
     }
 
@@ -1014,17 +1050,39 @@ sealed class Transport : IDisposable
             summaryRttSum += ms;
             summaryRttMax = Math.Max(summaryRttMax, ms);
             if (ms < StallThresholdMs) return;
-            // Our frames unacknowledged or retransmitted during this ping: PC -> NodeMCU was stuck.
-            // Otherwise frames were delivered and only the reply (NodeMCU -> PC) was late.
-            bool forward = forwardBlockedDuringPing || tcpRetrans != retransAtPing || tcpTimeouts != timeoutsAtPing;
-            if (forward) forwardStalls++; else returnStalls++;
-            string direction = forward
-                ? $"PC->NodeMCU blocked (retransmitted {tcpRetrans - retransAtPing} bytes, {tcpTimeouts - timeoutsAtPing} RTO)"
-                : "PC->NodeMCU delivered; NodeMCU->PC reply delayed";
             summaryStalls++;
             totalStalls++;
             summaryLongestStall = Math.Max(summaryLongestStall, ms);
             longestStall = Math.Max(longestStall, ms);
+            // A late PONG cannot say which direction stalled, and Windows also retransmits when
+            // only the NodeMCU's ACKs are lost. Ask the NodeMCU whether our data kept arriving.
+            pendingStallMs = Math.Max(pendingStallMs, ms);
+            pendingStallTcpHint |= forwardBlockedDuringPing || tcpRetrans != retransAtPing || tcpTimeouts != timeoutsAtPing;
+            if (pendingStallAt == 0) pendingStallAt = Environment.TickCount64;
+            gapQueryNeeded = true;
+        }
+    }
+
+    // gapMs: longest silence the NodeMCU saw from us since the previous GAP? (null: no reply,
+    // firmware before 2.3). Input frames arrive at least every 250 ms, so 500+ ms means our
+    // data stopped; otherwise input kept arriving and only the NodeMCU's replies were late.
+    void ResolveStall(long? gapMs)
+    {
+        lock (linkLock)
+        {
+            if (pendingStallMs == 0) return;
+            double ms = pendingStallMs;
+            bool forward = gapMs is { } g ? g >= 500 : pendingStallTcpHint;
+            if (forward) forwardStalls++; else returnStalls++;
+            string direction = gapMs is { } gap
+                ? forward ? $"PC->NodeMCU stalled (NodeMCU received nothing for {gap} ms)"
+                          : $"NodeMCU->PC replies delayed; input kept arriving (longest gap {gap} ms)"
+                : !tcpStatsAvailable ? "direction unknown"
+                : forward ? "likely PC->NodeMCU (TCP retransmits; update NodeMCU firmware to confirm)"
+                          : "likely NodeMCU->PC (no TCP retransmits; update NodeMCU firmware to confirm)";
+            pendingStallMs = 0;
+            pendingStallTcpHint = false;
+            pendingStallAt = 0;
             if (ms < 500) return;
             // Bound log volume on a bad link: one stall line per 5 s plus a suppressed count.
             long now = Environment.TickCount64;
@@ -1033,10 +1091,14 @@ sealed class Transport : IDisposable
             lastStallLogTick = now;
             suppressedStallLogs = 0;
             int rssi = Volatile.Read(ref espRssi);
-            if (!tcpStatsAvailable) direction = "direction unknown (TCP_INFO unavailable)";
             DiagnosticLog.Warn($"Link stall: PONG after {ms:F0} ms, {direction}, RSSI {(rssi == int.MinValue ? "?" : rssi.ToString())} dBm{more}");
         }
     }
+
+    double pendingStallMs;
+    bool pendingStallTcpHint;
+    long pendingStallAt;
+    volatile bool gapQueryNeeded;
 
     void LogLinkSummary(string when)
     {
