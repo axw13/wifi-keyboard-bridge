@@ -43,6 +43,8 @@ sealed class SettingsWindow : Form
     readonly Label mouseDiag = new() { AutoSize = true, MaximumSize = new System.Drawing.Size(405, 0) };
     readonly Label picoDiag = new() { AutoSize = true, MaximumSize = new System.Drawing.Size(405, 0) };
     readonly Label espDiag = new() { AutoSize = true, MaximumSize = new System.Drawing.Size(405, 0) };
+    readonly Label linkDiag = new() { AutoSize = true, MaximumSize = new System.Drawing.Size(405, 0) };
+    readonly Label firmwareDiag = new() { AutoSize = true, MaximumSize = new System.Drawing.Size(405, 0) };
     readonly Label benchmarkResult = new() { AutoSize = true, MaximumSize = new System.Drawing.Size(395, 0) };
     readonly TextBox host = new() { Width = 160 };
     readonly CheckBox autoDiscovery = new() { Text = "Automatic detect NodeMCU (manual IP fallback)", AutoSize = true };
@@ -233,11 +235,30 @@ sealed class SettingsWindow : Form
                     $"Mouse interval target: {network.MouseUpdateMs} ms\n" +
                     $"Wi-Fi RTT: {network.RoundTripMs?.ToString("F1") ?? "unavailable"} ms\n" +
                     network.BenchmarkStatus() + "\n" + network.MouseDiagnostics() + "\n" +
-                    network.SchedulerDiagnostics() + "\n" + network.EspDiagnostics() + "\n" + network.PicoDiagnostics() + "\n");
+                    network.SchedulerDiagnostics() + "\n" + network.EspDiagnostics() + "\n" + network.PicoDiagnostics() + "\n" +
+                    network.LinkDiagnostics() + "\n" + "Firmware: " + (network.FirmwareDiag ?? "unavailable") + "\n" +
+                    "RTT history (ms): " + string.Join(", ", network.RttHistory().Select(v => v.ToString("F0"))) + "\n\n" +
+                    "Recent log (" + DiagnosticLog.LogPath + "):\n" + DiagnosticLog.Tail(400) + "\n");
             }
             catch (Exception ex) { MessageBox.Show(this, ex.Message, "Export failed"); }
         };
         diagnostics.Controls.Add(export, 1, 9);
+        var openLogs = new Button { Text = "Open log folder", AutoSize = true };
+        openLogs.Click += (_, _) =>
+        {
+            try
+            {
+                Directory.CreateDirectory(DiagnosticLog.LogDirectory);
+                Process.Start(new ProcessStartInfo(DiagnosticLog.LogDirectory) { UseShellExecute = true });
+            }
+            catch (Exception ex) { MessageBox.Show(this, ex.Message, "Unable to open log folder"); }
+        };
+        diagnostics.Controls.Add(openLogs, 0, 9);
+        diagnostics.Controls.Add(linkDiag, 0, 7);
+        diagnostics.SetColumnSpan(linkDiag, 2);
+        diagnostics.Controls.Add(firmwareDiag, 0, 8);
+        diagnostics.SetColumnSpan(firmwareDiag, 2);
+        diagnostics.RowStyles[8].Height = 64;
         diagnostics.Controls.Add(rttGraph, 0, 6);
         diagnostics.SetColumnSpan(rttGraph, 2);
         diagnostics.RowStyles[6].Height = 120;
@@ -389,6 +410,10 @@ sealed class SettingsWindow : Form
         schedulerDiag.Text = network.SchedulerDiagnostics();
         espDiag.Text = network.EspDiagnostics();
         picoDiag.Text = network.PicoDiagnostics();
+        linkDiag.Text = network.LinkDiagnostics();
+        firmwareDiag.Text = network.Connected
+            ? "Firmware: " + (network.FirmwareDiag?.Replace(",", ", ") ?? "awaiting DIAG reply (update NodeMCU firmware)")
+            : "";
         rttGraph.Samples = network.RttHistory();
     }
 
