@@ -31,6 +31,7 @@ record UserPreferences(int ToggleKey, int MouseToggleKey = 0x7A, bool Linked = f
 sealed class SettingsWindow : Form
 {
     readonly Transport network;
+    readonly ComboBox linkMode = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 240 };
     readonly Func<bool> remote;
     readonly Func<int> getHotkey;
     readonly Action<int> setHotkey;
@@ -146,6 +147,9 @@ sealed class SettingsWindow : Form
         token.Text = cfg.Token;
         AddRow(panel, 0, "NodeMCU IP / host", host);
         connection.Controls.Add(autoDiscovery, 1, 10);
+        linkMode.Items.AddRange(new object[] { "Wi-Fi", "USB serial (NodeMCU USB port)", "Automatic (USB, else Wi-Fi)" });
+        linkMode.SelectedIndex = (cfg.Link ?? "wifi").ToLowerInvariant() switch { "usb" => 1, "auto" => 2, _ => 0 };
+        AddRow(connection, 9, "Link to NodeMCU", linkMode);
         AddRow(panel, 1, "TCP port", port);
         AddRow(panel, 2, "Shared token", token);
         AddRow(connection, 3, "Connection / mode", state);
@@ -175,7 +179,8 @@ sealed class SettingsWindow : Form
             }
             if (MessageBox.Show(this, "Switch to LOCAL, save connection settings and restart Keyboard Bridge?",
                 "Apply connection", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
-            try { applyConnection(cfg with { Host = newHost, Port = (int)port.Value, Token = token.Text, AutoDiscover = autoDiscovery.Checked }); }
+            try { applyConnection(cfg with { Host = newHost, Port = (int)port.Value, Token = token.Text, AutoDiscover = autoDiscovery.Checked,
+                Link = linkMode.SelectedIndex switch { 1 => "usb", 2 => "auto", _ => "wifi" } }); }
             catch (Exception ex) { MessageBox.Show(this, ex.Message, "Unable to save connection settings"); }
         };
         connection.Controls.Add(saveConnection, 1, 8);

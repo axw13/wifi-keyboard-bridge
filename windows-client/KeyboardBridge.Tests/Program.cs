@@ -43,6 +43,8 @@ static class Tests
         Integrity();
         Console.WriteLine("== Secure TCP link against an in-process server ==");
         await LinkAgainstFakeServer();
+        Console.WriteLine("== USB serial reply parsing ==");
+        UsbParsing();
         if (args.Contains("--device"))
         {
             Console.WriteLine("== Real NodeMCU ==");
@@ -338,6 +340,27 @@ static class Tests
     }
 
 
+    static void UsbParsing()
+    {
+        string[] Parse(params byte[][] chunks)
+        {
+            var p = new UsbReplyParser();
+            foreach (var c in chunks) p.Feed(c, c.Length);
+            var all = new List<string>();
+            while (p.TryTake(out var l)) all.Add(l);
+            return all.ToArray();
+        }
+        byte[] B(string s) => Encoding.Latin1.GetBytes(s);
+        Check(Parse(B("#PONG\n")).SequenceEqual(new[] { "PONG" }), "a '#' line is a reply, without the '#'");
+        Check(Parse(B("S,0,115,0,0,0,0,0\r\n" + "M,0,0,0,0\r\n" + "#PONG\r\n")).SequenceEqual(new[] { "PONG" }), "lines meant for the Pico are skipped; CRLF is stripped");
+        Check(Parse(B("#PO"), B("NG\n#STAT,-5"), B("0,1,2,3\n")).SequenceEqual(new[] { "PONG", "STAT,-50,1,2,3" }), "replies split across reads are reassembled");
+        Check(Parse(B("\xff\xfe junk \n#USB,3.1\n")).SequenceEqual(new[] { "USB,3.1" }), "boot noise before a reply is ignored");
+        Check(Parse(B(new string('x', 5000) + "\n#OK\n")).SequenceEqual(new[] { "OK" }), "an over-long line is dropped without losing the next reply");
+        Check(Parse(B("#\n#A\n")).SequenceEqual(new[] { "A" }), "an empty reply is ignored");
+        var diag = "DIAG,fw=3.1," + string.Join(",", Enumerable.Range(0, 40).Select(i => "k" + i + "=" + i * 1000));
+        Check(Parse(B("#" + diag + "\n")).SequenceEqual(new[] { diag }) && diag.Length < UsbReplyParser.MaxLine, $"a full DIAG reply ({diag.Length} chars) fits the line limit");
+    }
+
     // ===================================== real hardware =====================================
     static class Device
     {
@@ -598,6 +621,116 @@ static class Tests
             // 6. End to end through the Pico: keys and mouse still arrive, and how fast.
             await Task.Delay(1200);
             await EndToEnd(cfg);
+
+            // 7. The same NodeMCU over its USB serial port.
+            await Task.Delay(1500);
+            await UsbTests(cfg);
+        }
+
+        static async Task UsbTests(Cfg cfg)
+        {
+            Console.WriteLine("== USB serial (the NodeMCU's own USB port) ==");
+            UsbLink usb;
+            try { usb = await UsbLink.ConnectAsync("auto", CancellationToken.None, 3000); }
+            catch (Exception ex) { Report(false, "NodeMCU answers on its USB serial port", ex.Message); return; }
+            using var usbOwner = usb;
+            Report(usb.Firmware.StartsWith("3."), $"NodeMCU answers on {usb.PortName} (firmware {usb.Firmware})");
+
+            // A background pump owns the read side; commands wait for their reply there.
+            var replies = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            _ = Task.Run(async () => { try { while (true) { var l = await usb.ReadLineAsync(CancellationToken.None); if (l == null) break; replies.Enqueue(l); } } catch { } });
+            async Task<string?> Ask(string command, string prefix, int waitMs = 1500)
+            {
+                while (replies.TryDequeue(out _)) { }
+                await usb.WriteLineAsync(command);
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                while (sw.ElapsedMilliseconds < waitMs)
+                {
+                    while (replies.TryDequeue(out var l)) if (l.StartsWith(prefix)) return l;
+                    await Task.Delay(2);
+                }
+                return null;
+            }
+            async Task<Dictionary<string, string>> UsbDiag()
+            {
+                var line = await Ask("DIAG", "DIAG,");
+                if (line == null) throw new IOException("no DIAG reply over USB");
+                return line[5..].Split(',').Select(p => p.Split('=', 2)).Where(p => p.Length == 2).ToDictionary(p => p[0], p => p[1]);
+            }
+            long PicoBad(Dictionary<string, string> d) => long.Parse(d["pico"].Split('/')[2]);
+
+            Report(await Ask("PING", "PONG") == "PONG", "PING answered over USB");
+            Report(await Ask("SELFTEST", "SELFTEST,") == "SELFTEST,OK", "firmware self-test over USB");
+            var d0 = await UsbDiag();
+            Report(N(d0, "usb") > 0 && d0["fw"] == usb.Firmware, "DIAG over USB reports the USB counters", $"usb={d0.GetValueOrDefault("usb")}");
+
+            // Garbage and an over-long line must not hurt the link.
+            await usb.WriteLineAsync("");
+            await usb.WriteLineAsync("hello\nnot a command\n" + new string('A', 300));
+            Report(await Ask("PING", "PONG") == "PONG", "link survives garbage and an over-long line");
+            var d1 = await UsbDiag();
+            Report(N(d1, "usbbad") > N(d0, "usbbad"), "the over-long line is counted, not forwarded", $"usbbad {d0["usbbad"]} -> {d1["usbbad"]}");
+
+            // Replies share the wire with the Pico; the Pico must ignore every one of them.
+            long badBefore = PicoBad(d1);
+            for (int i = 0; i < 20; i++) { await Ask("STAT", "STAT,", 500); await Ask("PICO?," + (100 + i), "PICO,", 800); }
+            await UsbDiag(); await Task.Delay(600);
+            var d2 = await UsbDiag();
+            Report(PicoBad(d2) == badBefore, "the Pico ignores the NodeMCU's replies (no bad frames)", $"bad {badBefore} -> {PicoBad(d2)}");
+
+            // Keys and mouse through the Pico.
+            var keyMs = new List<double>(); var moveMs = new List<double>(); int keyFail = 0, moveFail = 0;
+            for (int i = 0; i < 30; i++)
+            {
+                await Task.Delay(150);
+                await usb.WriteLineAsync("S,0,115,0,0,0,0,0");
+                var t = WaitFor(F24Down);
+                if (t is { } k) keyMs.Add(k); else keyFail++;
+                await usb.WriteLineAsync("S,0,0,0,0,0,0,0");
+                WaitFor(() => !F24Down());
+                await Task.Delay(100);
+                var p0 = Pos();
+                await usb.WriteLineAsync("M,0,20,0,0");
+                var m = WaitFor(() => Pos() != p0);
+                if (m is { } mm) moveMs.Add(mm); else moveFail++;
+                await Task.Delay(100);
+                await usb.WriteLineAsync("M,0,-20,0,0");
+                await Task.Delay(100);
+            }
+            Report(keyFail == 0 && keyMs.Count == 30, $"USB key press reaches Windows through the Pico ({keyMs.Count}/30)");
+            Report(moveFail == 0 && moveMs.Count == 30, $"USB mouse move reaches Windows through the Pico ({moveMs.Count}/30)");
+            if (keyMs.Count > 0) { keyMs.Sort(); Console.WriteLine($"        key latency  median {keyMs[keyMs.Count / 2]:F1} ms, max {keyMs[^1]:F1} ms"); }
+            if (moveMs.Count > 0) { moveMs.Sort(); Console.WriteLine($"        move latency median {moveMs[moveMs.Count / 2]:F1} ms, max {moveMs[^1]:F1} ms"); }
+            Report(keyMs.Count == 0 || keyMs[keyMs.Count / 2] < 40, "median key latency under 40 ms");
+
+            // Dead-man release: a key held by the USB client is released when the client goes silent.
+            await usb.WriteLineAsync("S,0,115,0,0,0,0,0");
+            bool down = WaitFor(F24Down) != null;
+            var sw2 = System.Diagnostics.Stopwatch.StartNew();
+            bool released = WaitFor(() => !F24Down(), 4000) != null;
+            Report(down && released && sw2.ElapsedMilliseconds is > 1000 and < 3500, $"a held key is released when USB goes silent ({sw2.ElapsedMilliseconds} ms)");
+            Report(!F24Down(), "no key left pressed");
+
+            // USB has priority over Wi-Fi while it is active, so only one source writes to the Pico.
+            await usb.WriteLineAsync("S,0,0,0,0,0,0,0");
+            var before = await UsbDiag();
+            using (var wifi = await Open(cfg))
+            {
+                await wifi.WriteLineAsync("S,0,115,0,0,0,0,0");
+                bool leaked = WaitFor(F24Down, 400) != null;
+                await wifi.WriteLineAsync("S,0,0,0,0,0,0,0");
+                var after = await UsbDiag();
+                Report(!leaked && N(after, "usbdrop") > N(before, "usbdrop"), "Wi-Fi input is ignored while USB is active", $"usbdrop {before["usbdrop"]} -> {after["usbdrop"]}");
+                await Task.Delay(1800);  // USB goes quiet; Wi-Fi may drive the Pico again
+                await wifi.WriteLineAsync("S,0,115,0,0,0,0,0");
+                bool wifiBack = WaitFor(F24Down, 500) != null;
+                await wifi.WriteLineAsync("S,0,0,0,0,0,0,0");
+                WaitFor(() => !F24Down());
+                Report(wifiBack, "Wi-Fi input works again once USB is quiet");
+            }
+            await usb.WriteLineAsync("S,0,0,0,0,0,0,0");
+            await usb.WriteLineAsync("M,0,0,0,0");
+            Report(!F24Down(), "no key left pressed after the priority test");
         }
 
         static async Task EndToEnd(Cfg cfg)

@@ -1,4 +1,4 @@
-"""Pico CircuitPython HID keyboard receiver. UART GP1 RX at 115200 baud."""
+"""Pico CircuitPython HID keyboard receiver. UART GP1 RX at 115200 baud. Lines starting with # are ignored."""
 import board
 import busio
 import time
@@ -22,6 +22,7 @@ mouse_buttons = 0
 # The default 64-byte RX buffer fills in ~5 ms at 115200 baud; send_report() can block that long.
 uart = busio.UART(tx=board.GP0, rx=board.GP1, baudrate=115200, timeout=0, receiver_buffer_size=512)
 line = bytearray()
+reply_line = False
 last_frame = time.monotonic()
 released = bytes(8)
 stale = False
@@ -103,9 +104,15 @@ while True:
         incoming = uart.read(waiting) if waiting else None
         if incoming:
             for b in incoming:
-                if b == 10:
+                if reply_line:
+                    # '#' lines are the NodeMCU answering the PC over USB serial (the same wire); not for us.
+                    if b == 10:
+                        reply_line = False
+                elif b == 10:
                     handle_line(line)
                     line = bytearray()  # CircuitPython does not support bytearray item deletion
+                elif b == 35 and len(line) == 0:
+                    reply_line = True
                 elif b != 13:
                     if len(line) < 80:
                         line.append(b)

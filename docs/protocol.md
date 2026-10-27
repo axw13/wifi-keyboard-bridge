@@ -104,13 +104,34 @@ one and a late one is dropped by sequence number.
 `DIAG` gains `sec=3`, `badtag=`, `udp=`, `udplost=`, `udpstale=` and `udpbad=` (datagrams that were forged, malformed or
 arrived with no UDP session). Set `"UseUdp": false` in `appsettings.json` to force TCP.
 
+## USB serial (firmware 3.1+, optional)
+
+When the PC and the target sit next to each other, the NodeMCU's own USB port (the COM port you flash it through)
+can carry the same commands as Wi-Fi. There is no radio in the path, so no Wi-Fi stalls: a key press reaches
+Windows in about 12 ms (median, maximum 15 ms) and the client's round trip to the NodeMCU is about 3 ms.
+
+* The client writes the command lines of this document (`S,...`, `M,...`, `PING`, `DIAG`, `PICO?,<id>`, ...) to the
+  port at 115200 baud, 8N1, one command per line. There is **no handshake and no encryption**: it is a cable between
+  two machines you own. DTR and RTS must stay low, or the NodeMCU's auto-reset circuit reboots it.
+* `USB?` is answered with `#USB,<firmware>`, which is how the client recognises the board (`"UsbPort": "auto"` tries every
+  COM port). The UDP commands (`UDP?`, `UACK?`) are ignored: UDP belongs to the Wi-Fi session.
+* **Replies** are `#<reply>` lines. The NodeMCU's TX pin is wired to the USB chip *and* to the Pico, so everything it
+  sends the Pico (the `S,`/`M,` lines it forwards, boot messages) also reaches the PC; the PC ignores every line
+  that does not start with `#`, and the Pico (`firmware/pico/code.py`) ignores every line that does.
+* **Priority.** While USB input is flowing (a `S,`/`M,` line in the last 1.5 s) Wi-Fi and UDP input is dropped and
+  counted (`usbdrop` in `DIAG`), so only one source writes to the Pico. If the USB client falls silent for 1.5 s, the
+  NodeMCU releases all keys and buttons once. A Wi-Fi client leaving does not release keys the USB client holds.
+* The NodeMCU keeps working on Wi-Fi too, and `DIAG` gains `usb=`, `usbbad=` (garbage or over-long lines) and `usbdrop=`.
+* Client setting `"Link"` in `appsettings.json` (or Settings > Connection > Link to NodeMCU): `"wifi"` (default),
+  `"usb"`, or `"auto"` (USB when a NodeMCU answers on a COM port, otherwise Wi-Fi). `"UsbPort"` is `"auto"` or a name such as `"COM5"`.
+
 ## Tests
 
 `dotnet run --project windows-client/KeyboardBridge.Tests` runs the published test vectors, key derivation, tamper
 detection (every single-bit change), replay/reorder/oversize handling and a handshake against an in-process server.
 Add `-- --device` (Windows client closed, Pico plugged into the same PC) to also test the real NodeMCU: cross-implementation
 handshake, firmware self-test, wrong-token and back-off behaviour, tampered and replayed TCP and UDP traffic, a wire capture
-showing no token or command text in the clear, and key/mouse delivery through the Pico with latency.
+showing no token or command text in the clear, and key/mouse delivery through the Pico with latency, and the same over USB serial (priority over Wi-Fi, release on silence, the Pico ignoring replies).
 
 ## Session timeouts
 
