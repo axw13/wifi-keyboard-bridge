@@ -175,7 +175,7 @@ sealed class SettingsWindow : Form
             }
             if (MessageBox.Show(this, "Switch to LOCAL, save connection settings and restart Keyboard Bridge?",
                 "Apply connection", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
-            try { applyConnection(new Settings(newHost, (int)port.Value, token.Text, autoDiscovery.Checked)); }
+            try { applyConnection(cfg with { Host = newHost, Port = (int)port.Value, Token = token.Text, AutoDiscover = autoDiscovery.Checked }); }
             catch (Exception ex) { MessageBox.Show(this, ex.Message, "Unable to save connection settings"); }
         };
         connection.Controls.Add(saveConnection, 1, 8);

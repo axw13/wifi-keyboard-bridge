@@ -35,6 +35,37 @@ This is a **UART probe round trip**, *not* a measurement of Windows-to-Pico, USB
 Pico → NodeMCU diagnostic lines: `A,<id>` (probe reply), then
 `C,<uptime s>,<frames>,<bad frames>,<watchdog releases>,<usb errors>,<loop errors>`.
 
+## UDP fast path (firmware 2.4+, optional)
+
+TCP delivers in order, so one lost Wi-Fi packet delays every key and mouse report behind it, and
+TCP's retransmit backoff keeps them waiting after the link has recovered. The UDP fast path avoids
+that: every datagram is a complete, idempotent snapshot, so a lost datagram is repaired by the next
+one and a late one is dropped by sequence number.
+
+1. After `OK`, the client sends `UDP?`. A 2.4+ NodeMCU answers `UDP,<port>,<sid>` (port 7778, `sid` a random
+   32-bit session id). Older firmware ignores the command and the client stays on TCP.
+2. The client sends datagrams to that port. The NodeMCU accepts them only from the TCP peer's IP address
+   and with the issued `sid`. Little endian:
+
+   | Type | Layout | Size |
+   | --- | --- | --- |
+   | State `0xB1` | `B1 sid(4) seq(2) mods keys(6) buttons x(2) y(2) wheel(2)` | 21 B |
+   | Ping `0xB2` | `B2 sid(4) seq(2) payload(4)`, echoed back unchanged | 11 B |
+
+   `x`, `y` and `wheel` are cumulative signed 16-bit counters (wrapping) that start at zero when `UDP?` is
+   answered. The NodeMCU forwards the difference since the last accepted datagram to the Pico as ordinary
+   `M,` reports (at most 16 per datagram; anything beyond is dropped), and forwards `S,` only when the keys
+   change or every 250 ms as the Pico's keepalive. A held mouse button or key state is repeated in every datagram.
+3. While UDP is active the client sends no `S,`/`M,` over TCP (an old, delayed TCP frame could otherwise
+   undo a newer state). TCP still carries `PING`, `STAT`, `DIAG`, `IDLE` and the other commands.
+4. The client sends a state datagram on every change (repeated for the next 3 mouse slots), every mouse
+   slot with motion, and at least every 250 ms.
+5. `UACK?` -> `UACK,<datagrams accepted>,<lost by sequence gap>,<stale or duplicate>`. If the accepted count
+   does not move for three checks (6 s) while the client keeps sending, the client logs a warning and falls
+   back to TCP for the rest of the session (e.g. UDP filtered by the router).
+
+`DIAG` gains `udp=`, `udplost=`, `udpstale=` and `udpbad=`. Set `"UseUdp": false` in `appsettings.json` to force TCP.
+
 ## Session timeouts
 
 * NodeMCU closes a connection that has not authenticated within 2 s.
