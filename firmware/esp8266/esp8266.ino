@@ -24,12 +24,13 @@ unsigned long lastIdleMove = 0;
 bool idleMoveRight = true;
 
 // Diagnostics: reported to Windows by the DIAG command and written to its log.
-const char* FIRMWARE_VERSION = "2.2";
+const char* FIRMWARE_VERSION = "2.3";
 const unsigned long AUTH_TIMEOUT_MS = 2000;  // unauthenticated sockets cannot hold the slot
 const unsigned long IDLE_TIMEOUT_MS = 5000;  // client keepalive is every 250 ms
 unsigned long connectedAt = 0;
 unsigned long lastRx = 0;
 unsigned long maxRxGap = 0;  // longest silence from the PC since the last DIAG (ms)
+unsigned long stallRxGap = 0;  // same, since the last GAP? (the client asks after each stall)
 unsigned long sessions = 0;
 unsigned long authFailures = 0;
 unsigned long authTimeouts = 0;
@@ -118,6 +119,10 @@ void setup() {
   // Modem sleep adds 100+ ms latency spikes; this device is mains powered.
   WiFi.setSleepMode(WIFI_NONE_SLEEP);
   WiFi.setAutoReconnect(true);
+#ifdef WIFI_FORCE_11G
+  // Some routers deliver ESP8266 802.11n traffic unreliably; 11g is often steadier.
+  WiFi.setPhyMode(WIFI_PHY_MODE_11G);
+#endif
   wifiDisconnectHandler = WiFi.onStationModeDisconnected([](const WiFiEventStationModeDisconnected& e) {
     wifiDisconnects++;
     lastWifiDisconnectReason = e.reason;
@@ -142,10 +147,10 @@ void sendDiag() {
   for (char* p = reset; *p; p++) if (*p == ',') *p = ' ';
   char buf[512];
   int n = snprintf(buf, sizeof(buf),
-    "DIAG,fw=%s,up=%lu,rssi=%d,ch=%d,heap=%u,frag=%u,sessions=%lu,authfail=%lu,authtimeout=%lu,"
+    "DIAG,fw=%s,up=%lu,rssi=%d,ch=%d,phy=%d,heap=%u,frag=%u,sessions=%lu,authfail=%lu,authtimeout=%lu,"
     "idletimeout=%lu,rxgap=%lu,wdrelease=%lu,badframe=%lu,overflow=%lu,picotimeout=%lu,wifidrop=%lu,"
     "wifireason=%d,lastend=%s,pico=%s,reset=%s\n",
-    FIRMWARE_VERSION, millis() / 1000, WiFi.RSSI(), WiFi.channel(), (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getHeapFragmentation(),
+    FIRMWARE_VERSION, millis() / 1000, WiFi.RSSI(), WiFi.channel(), (int)WiFi.getPhyMode(), (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getHeapFragmentation(),
     sessions, authFailures, authTimeouts, idleTimeouts, maxRxGap, watchdogReleases, invalidFrames, lineOverflows,
     picoProbeTimeouts, wifiDisconnects, lastWifiDisconnectReason, lastSessionEnd, picoCounters, reset);
   if (n >= (int)sizeof(buf)) n = sizeof(buf) - 1;
@@ -182,7 +187,9 @@ void loop() {
   }
   if (client.available()) {
     // The client sends at least every 250 ms, so a long gap means PC -> NodeMCU stalled.
-    if (authorized && millis() - lastRx > maxRxGap) maxRxGap = millis() - lastRx;
+    unsigned long gap = millis() - lastRx;
+    if (authorized && gap > maxRxGap) maxRxGap = gap;
+    if (authorized && gap > stallRxGap) stallRxGap = gap;
     lastRx = millis();
   }
   while (client.available()) {
@@ -205,6 +212,12 @@ void loop() {
         sendStat();
       } else if (line == "DIAG") {
         sendDiag();
+      } else if (line == "GAP?") {
+        // Lets the client tell a PC -> NodeMCU stall from a delayed reply.
+        char buf[24];
+        int n = snprintf(buf, sizeof(buf), "GAP,%lu\n", stallRxGap);
+        client.write((const uint8_t*)buf, n);
+        stallRxGap = 0;
       } else if (line.startsWith("PICO?,")) {
         unsigned long id = line.substring(6).toInt();
         if (line.length() <= 11 && id <= 65535 && line == String("PICO?,") + id && !picoProbePending) {

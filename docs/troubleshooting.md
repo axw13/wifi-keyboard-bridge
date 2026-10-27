@@ -18,8 +18,8 @@ logged.
 | `Connected to … TCP connect X ms, authenticated Y ms` | Each successful session |
 | `Connect attempt failed: …` | Host unreachable, auth timeout, or `token mismatch?` |
 | `Connection ended after hh:mm:ss: …` | Why the session ended, followed by a link summary |
-| `No PONG for N ms; link presumed dead` | NodeMCU stopped answering; the client reconnects instead of silently swallowing input |
-| `Link stall: PONG after N ms, <direction>, RSSI R dBm` | A Wi-Fi stall of 500 ms or more (at most one line per 5 s). `PC->NodeMCU blocked` means Windows had to retransmit or its frames sat unacknowledged. `NodeMCU->PC reply delayed` means input was delivered and only the reply was late |
+| `No PONG for N ms; link presumed dead` | NodeMCU stopped answering for 10 s; the client reconnects instead of silently swallowing input |
+| `Link stall: PONG after N ms, <direction>, RSSI R dBm` | A Wi-Fi stall of 500 ms or more (at most one line per 5 s). After each stall the client asks the NodeMCU (`GAP?`) how long it went without data. `PC->NodeMCU stalled` means your input really stopped arriving. `NodeMCU->PC replies delayed; input kept arriving` means typing and mouse still reached the remote PC and only the replies were late. With firmware older than 2.3 the line says `likely …`, a guess from Windows TCP retransmits. That guess is unreliable, because Windows also retransmits when only the NodeMCU's ACKs are lost |
 | `Link summary (periodic)` | Every 60 s: RTT avg/max, stall count, RSSI, scheduler pacing, Pico probe, dropped frames |
 | `Firmware: fw=…` | NodeMCU `DIAG` counters, at connect and every 60 s (see below) |
 | `Keyboard REMOTE/LOCAL`, `Mouse REMOTE/LOCAL`, `Emergency LOCAL: reason` | Every mode change and why |
@@ -32,7 +32,7 @@ logged.
 | --- | --- | --- |
 | `up` | NodeMCU uptime (s) | Resets to a low value: NodeMCU rebooted. Check `reset` |
 | `reset` | Reason for the last NodeMCU boot | `Hardware/Software Watchdog` or `Exception`: firmware crash or brown-out (power supply) |
-| `rssi`, `ch` | Signal (dBm) and Wi-Fi channel | Below about −67 dBm expect stalls. Move the NodeMCU or the router, or use a less crowded channel |
+| `rssi`, `ch`, `phy` | Signal (dBm), Wi-Fi channel, PHY mode (1 = b, 2 = g, 3 = n) | Below about −67 dBm expect stalls. Move the NodeMCU or the router, or use a less crowded channel |
 | `wifidrop`, `wifireason` | Wi-Fi disconnects and the last 802.11 reason code | 200/201/202 beacon timeout, AP not found, auth fail: signal or router problem |
 | `idletimeout` | Sessions dropped after 5 s without data | The PC or its Wi-Fi went away |
 | `rxgap` | Longest silence from the PC since the previous `DIAG` (ms). Normally ≤ 250 | Values of 500 ms or more confirm a PC → NodeMCU stall |
@@ -57,6 +57,12 @@ logged.
 * **The Link line** splits stalls into `PC→NodeMCU` and `NodeMCU→PC`, and shows
   TCP retransmissions. Mostly PC→NodeMCU stalls with the PC on Wi-Fi usually
   means the PC's own adapter is scanning or roaming (see below).
+* **Mostly NodeMCU→PC stalls** mean packets *sent by the ESP8266* get lost. Its
+  TCP stack retransmits only after about 1 s, then 2 s, then 4 s, which matches
+  1–2 s stalls. Input is unaffected. If they are frequent, try a less crowded
+  channel (fixed 1, 6 or 11 on the router), move the NodeMCU, or uncomment
+  `#define WIFI_FORCE_11G` in `secrets.h` and reflash. `phy=2` in the firmware
+  line confirms 11g is active.
 * **Periodic 1–2 s stalls with good RSSI and `wifidrop=0`** are usually
   background Wi-Fi scans by the *PC*, or by the router changing channel. If the
   PC is on Wi-Fi, set the adapter's *Roaming Aggressiveness* to *Lowest*, turn
