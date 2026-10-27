@@ -40,6 +40,6 @@ Pico → NodeMCU diagnostic lines: `A,<id>` (probe reply), then
 * NodeMCU closes an authenticated session after 5 s without any received data.
   Clients must send at least every 250 ms.
 * The Windows client treats 5 s without a `PONG` as a dead link and reconnects.
-  While a `PING` has been outstanding for more than 250 ms, it holds mouse
-  motion (accumulated, bounded) and suppresses duplicate keepalives so stale
-  frames don't queue behind a Wi-Fi retransmission.
+  While more than 200 bytes it sent are unacknowledged (Windows `TCP_INFO`), it
+  holds mouse motion (accumulated, bounded) so stale reports don't queue behind a
+  Wi-Fi retransmission. Keepalives are always sent.

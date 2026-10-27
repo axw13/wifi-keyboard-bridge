@@ -19,7 +19,7 @@ logged.
 | `Connect attempt failed: …` | Host unreachable, auth timeout, or `token mismatch?` |
 | `Connection ended after hh:mm:ss: …` | Why the session ended, followed by a link summary |
 | `No PONG for N ms; link presumed dead` | NodeMCU stopped answering; the client reconnects instead of silently swallowing input |
-| `Link stall: PONG after N ms, RSSI R dBm` | A Wi-Fi stall of 500 ms or more (at most one line per 5 s) |
+| `Link stall: PONG after N ms, <direction>, RSSI R dBm` | A Wi-Fi stall of 500 ms or more (at most one line per 5 s). `PC->NodeMCU blocked` means Windows had to retransmit or its frames sat unacknowledged. `NodeMCU->PC reply delayed` means input was delivered and only the reply was late |
 | `Link summary (periodic)` | Every 60 s: RTT avg/max, stall count, RSSI, scheduler pacing, Pico probe, dropped frames |
 | `Firmware: fw=…` | NodeMCU `DIAG` counters, at connect and every 60 s (see below) |
 | `Keyboard REMOTE/LOCAL`, `Mouse REMOTE/LOCAL`, `Emergency LOCAL: reason` | Every mode change and why |
@@ -35,6 +35,7 @@ logged.
 | `rssi`, `ch` | Signal (dBm) and Wi-Fi channel | Below about −67 dBm expect stalls. Move the NodeMCU or the router, or use a less crowded channel |
 | `wifidrop`, `wifireason` | Wi-Fi disconnects and the last 802.11 reason code | 200/201/202 beacon timeout, AP not found, auth fail: signal or router problem |
 | `idletimeout` | Sessions dropped after 5 s without data | The PC or its Wi-Fi went away |
+| `rxgap` | Longest silence from the PC since the previous `DIAG` (ms). Normally ≤ 250 | Values of 500 ms or more confirm a PC → NodeMCU stall |
 | `authfail`, `authtimeout` | Bad token, or a connection that never authenticated | Something else on the LAN is connecting to port 7777 |
 | `wdrelease` | Keys released by the 1.5 s NodeMCU watchdog | Stalls longer than 1.5 s. Held keys were released for safety |
 | `badframe`, `overflow` | Rejected frames, over-long lines | Client/firmware version mismatch |
@@ -50,7 +51,18 @@ logged.
   retransmitted. Check RSSI first. The NodeMCU firmware now disables Wi-Fi modem
   sleep, which removes most periodic 100–300 ms spikes. While a stall lasts, the
   client now holds mouse motion and sends it as one report when the link
-  recovers, instead of replaying a burst of stale movement.
+  recovers, instead of replaying a burst of stale movement. Motion is held only
+  while Windows reports its own frames to the NodeMCU as unacknowledged. A reply
+  that is merely late does not freeze input.
+* **The Link line** splits stalls into `PC→NodeMCU` and `NodeMCU→PC`, and shows
+  TCP retransmissions. Mostly PC→NodeMCU stalls with the PC on Wi-Fi usually
+  means the PC's own adapter is scanning or roaming (see below).
+* **Periodic 1–2 s stalls with good RSSI and `wifidrop=0`** are usually
+  background Wi-Fi scans by the *PC*, or by the router changing channel. If the
+  PC is on Wi-Fi, set the adapter's *Roaming Aggressiveness* to *Lowest*, turn
+  off adapter power saving, or use Ethernet. Run `ping -t <router IP>` and
+  `ping -t <NodeMCU IP>` side by side. If both spike together, the PC's Wi-Fi is
+  the cause.
 * **Scheduler interval stuck at about 16/32 ms** was the Windows 15.6 ms timer.
   The client now raises the timer resolution to 1 ms while connected (the
   Diagnostics tab shows `timer 1 ms`), so 8–11 ms mouse intervals work.

@@ -24,11 +24,12 @@ unsigned long lastIdleMove = 0;
 bool idleMoveRight = true;
 
 // Diagnostics: reported to Windows by the DIAG command and written to its log.
-const char* FIRMWARE_VERSION = "2.1";
+const char* FIRMWARE_VERSION = "2.2";
 const unsigned long AUTH_TIMEOUT_MS = 2000;  // unauthenticated sockets cannot hold the slot
 const unsigned long IDLE_TIMEOUT_MS = 5000;  // client keepalive is every 250 ms
 unsigned long connectedAt = 0;
 unsigned long lastRx = 0;
+unsigned long maxRxGap = 0;  // longest silence from the PC since the last DIAG (ms)
 unsigned long sessions = 0;
 unsigned long authFailures = 0;
 unsigned long authTimeouts = 0;
@@ -142,14 +143,15 @@ void sendDiag() {
   char buf[512];
   int n = snprintf(buf, sizeof(buf),
     "DIAG,fw=%s,up=%lu,rssi=%d,ch=%d,heap=%u,frag=%u,sessions=%lu,authfail=%lu,authtimeout=%lu,"
-    "idletimeout=%lu,wdrelease=%lu,badframe=%lu,overflow=%lu,picotimeout=%lu,wifidrop=%lu,"
+    "idletimeout=%lu,rxgap=%lu,wdrelease=%lu,badframe=%lu,overflow=%lu,picotimeout=%lu,wifidrop=%lu,"
     "wifireason=%d,lastend=%s,pico=%s,reset=%s\n",
     FIRMWARE_VERSION, millis() / 1000, WiFi.RSSI(), WiFi.channel(), (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getHeapFragmentation(),
-    sessions, authFailures, authTimeouts, idleTimeouts, watchdogReleases, invalidFrames, lineOverflows,
+    sessions, authFailures, authTimeouts, idleTimeouts, maxRxGap, watchdogReleases, invalidFrames, lineOverflows,
     picoProbeTimeouts, wifiDisconnects, lastWifiDisconnectReason, lastSessionEnd, picoCounters, reset);
   if (n >= (int)sizeof(buf)) n = sizeof(buf) - 1;
   buf[n - 1] = '\n';
   client.write((const uint8_t*)buf, n);
+  maxRxGap = 0;
 }
 void loop() {
   MDNS.update();
@@ -178,7 +180,11 @@ void loop() {
     resetSession("idle-timeout");
     return;
   }
-  if (client.available()) lastRx = millis();
+  if (client.available()) {
+    // The client sends at least every 250 ms, so a long gap means PC -> NodeMCU stalled.
+    if (authorized && millis() - lastRx > maxRxGap) maxRxGap = millis() - lastRx;
+    lastRx = millis();
+  }
   while (client.available()) {
     char c = (char)client.read();
     if (c == '\r') continue;

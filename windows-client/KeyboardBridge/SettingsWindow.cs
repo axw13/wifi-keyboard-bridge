@@ -181,7 +181,7 @@ sealed class SettingsWindow : Form
         connection.Controls.Add(saveConnection, 1, 8);
         var note = new Label
         {
-            Text = "RTT is Windows ↔ NodeMCU ping time, not full key-to-screen latency. New firmware required for RTT.",
+            Text = "RTT is Windows ↔ NodeMCU ping time, not full key-to-screen latency. Logs: Open log folder; see docs/troubleshooting.md.",
             AutoSize = true, MaximumSize = new System.Drawing.Size(390, 0)
         };
         AddRow(input, 2, "Mouse shortcut", mouseHotkey);
