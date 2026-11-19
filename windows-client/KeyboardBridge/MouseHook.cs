@@ -43,11 +43,17 @@ sealed class MouseHook : IDisposable
             case 0x207: buttons |= 4; break;
             case 0x208: buttons &= ~4; break;
             case 0x20A: wheel = Math.Sign(wheel); break;
+            // WM_XBUTTONDOWN/UP: the high word of mouseData says which side button (1 = back, 2 = forward).
+            // They are HID buttons 4 and 5, so bits 0x08 and 0x10.
+            case 0x20B: buttons |= XButtonBit(wheel); wheel = 0; break;
+            case 0x20C: buttons &= ~XButtonBit(wheel); wheel = 0; break;
             default: return false;
         }
         // Movement is coalesced and rate-limited by Transport instead of flooding TCP.
         return send(buttons, 0, 0, wheel);
     }
+
+    static int XButtonBit(int which) => which switch { 1 => 8, 2 => 16, _ => 0 };
 
     IntPtr OnMouse(int code, IntPtr wParam, IntPtr lParam)
     {
@@ -57,7 +63,9 @@ sealed class MouseHook : IDisposable
             if ((data.Flags & 1) == 0)
             {
                 int msg = wParam.ToInt32();
-                int wheel = msg == 0x20A ? (short)(data.MouseDataValue >> 16) : 0;
+                // The wheel delta (signed) or the side-button id both live in the high word of mouseData.
+                int wheel = msg == 0x20A ? (short)(data.MouseDataValue >> 16)
+                          : msg == 0x20B || msg == 0x20C ? (int)(data.MouseDataValue >> 16) : 0;
                 try { if (handler(msg, data.Pt.X, data.Pt.Y, wheel)) return (IntPtr)1; }
                 catch { /* Fail open on hook exceptions */ }
             }

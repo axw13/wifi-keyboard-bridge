@@ -417,7 +417,7 @@ void forwardUdpState(const uint8_t* d) {
     serialFrames++;
     serialBytes += n;
   }
-  uint8_t buttons = d[7] & 7;
+  uint8_t buttons = d[7] & 0x1F;  // left, right, middle, back, forward
   int16_t x = (int16_t)readLe16(d + 8), y = (int16_t)readLe16(d + 10), w = (int16_t)readLe16(d + 12);
   int dx = (int16_t)(x - udpCumX), dy = (int16_t)(y - udpCumY), dw = (int16_t)(w - udpCumW);
   udpCumX = x; udpCumY = y; udpCumW = w;

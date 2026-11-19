@@ -74,7 +74,7 @@ def handle_line(data):
             return
         if len(parts) == 5 and parts[0] == "M":
             buttons, dx, dy, wheel = [int(v) for v in parts[1:]]
-            if 0 <= buttons <= 7 and all(-127 <= v <= 127 for v in (dx, dy, wheel)):
+            if 0 <= buttons <= 31 and all(-127 <= v <= 127 for v in (dx, dy, wheel)):
                 mouse_buttons = buttons
                 mouse_report(buttons, dx, dy, wheel)
                 last_frame = time.monotonic()

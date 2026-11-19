@@ -24,7 +24,7 @@ This is a **UART probe round trip**, *not* a measurement of Windows-to-Pico, USB
 | Command | Reply | Purpose |
 | --- | --- | --- |
 | `S,<mod>,<k1>..<k6>` | — | Full keyboard state. Resent every 250 ms as a keepalive |
-| `M,<buttons>,<dx>,<dy>,<wheel>` | — | Mouse report. `buttons` 0–7, deltas −127..127 |
+| `M,<buttons>,<dx>,<dy>,<wheel>` | — | Mouse report. `buttons` 0–31 (bit 0 left, 1 right, 2 middle, 3 back, 4 forward), deltas −127..127 |
 | `PING` | `PONG` | Link RTT. Sent every 500 ms, one outstanding at a time |
 | `STAT` | `STAT,<rssi>,<free heap>,<uart frames>,<uart bytes>` | Telemetry, every 2 s |
 | `DIAG` | `DIAG,key=value,...` | Diagnostic counters (see `docs/troubleshooting.md`), at connect and every 60 s. Unknown keys must be ignored |
