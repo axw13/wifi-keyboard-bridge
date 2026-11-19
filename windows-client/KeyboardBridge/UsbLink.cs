@@ -61,17 +61,63 @@ public sealed class UsbLink : ILineLink
 
     public static string[] AvailablePorts() => SerialPort.GetPortNames().OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToArray();
 
-    /// <summary>Opens the port and checks that a NodeMCU with firmware 3.1+ answers. "auto" tries every port.</summary>
+    static readonly string lastPortFile = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WifiKeyboardBridge", "usbport.txt");
+
+    static string? LoadLastPort()
+    {
+        try { return File.Exists(lastPortFile) ? File.ReadAllText(lastPortFile).Trim() : null; }
+        catch { return null; }
+    }
+
+    static void SaveLastPort(string name)
+    {
+        try
+        {
+            if (LoadLastPort() == name) return;
+            Directory.CreateDirectory(Path.GetDirectoryName(lastPortFile)!);
+            File.WriteAllText(lastPortFile, name);
+        }
+        catch { /* only a speed-up; never fail a connection over it */ }
+    }
+
+    /// <summary>Opens the port and checks that a NodeMCU with firmware 3.1+ answers. "auto" tries the port that
+    /// worked last time first, then the rest. Each port gets a hard deadline: a driver that hangs in Open or Close
+    /// is abandoned instead of freezing the connect loop.</summary>
     public static async Task<UsbLink> ConnectAsync(string portName, CancellationToken ct, int timeoutMs = 1500)
     {
-        var candidates = string.Equals(portName, "auto", StringComparison.OrdinalIgnoreCase) || string.IsNullOrWhiteSpace(portName)
-            ? AvailablePorts() : new[] { portName };
+        bool auto = string.Equals(portName, "auto", StringComparison.OrdinalIgnoreCase) || string.IsNullOrWhiteSpace(portName);
+        var candidates = auto ? AvailablePorts() : new[] { portName };
+        if (auto)
+        {
+            string? remembered = LoadLastPort();
+            if (remembered is not null)
+                candidates = candidates.OrderBy(n => string.Equals(n, remembered, StringComparison.OrdinalIgnoreCase) ? 0 : 1).ToArray();
+        }
         if (candidates.Length == 0) throw new IOException("No serial ports found");
         Exception? last = null;
         foreach (var name in candidates)
         {
-            try { return await OpenAsync(name, ct, timeoutMs); }
-            catch (Exception ex) when (!ct.IsCancellationRequested) { last = ex; }
+            DiagnosticLog.Write($"USB serial: probing {name}");
+            try
+            {
+                var attempt = Task.Run(() => OpenAsync(name, ct, timeoutMs), ct);
+                var finished = await Task.WhenAny(attempt, Task.Delay(timeoutMs + 2000, ct));
+                if (finished != attempt)
+                {
+                    // Open or Close is stuck inside the driver. Give up on this port; if it ever completes, close it.
+                    _ = attempt.ContinueWith(t => { if (t.IsCompletedSuccessfully) t.Result.Dispose(); }, TaskScheduler.Default);
+                    throw new TimeoutException("port did not respond (driver stuck?)");
+                }
+                var link = await attempt;
+                SaveLastPort(name);
+                return link;
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                last = ex;
+                DiagnosticLog.Warn($"USB serial: {name} unusable: {ex.Message}");
+            }
         }
         throw new IOException(candidates.Length == 1 ? $"{candidates[0]}: {last?.Message}" :
             "No NodeMCU answered on " + string.Join(", ", candidates) + (last is null ? "" : " (" + last.Message + ")"));
